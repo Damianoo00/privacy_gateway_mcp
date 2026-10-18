@@ -1,0 +1,13 @@
+{
+  "source_roots": ["/absolute/path/to/read-only-documents"],
+  "workspace": "/absolute/path/to/private-gateway-workspace",
+  "language": "en",
+  "spacy_model": "en_core_web_lg",
+  "policy_version": "1",
+  "entities": ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IBAN_CODE", "LOCATION", "DATE_TIME"],
+  "score_threshold": 0.35,
+  "cache_ttl_seconds": 3600,
+  "max_source_bytes": 10485760,
+  "max_output_chars": 1000000,
+  "access_scope": "local-user"
+}
