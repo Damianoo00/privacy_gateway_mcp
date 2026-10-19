@@ -12,3 +12,14 @@ workspace/
 config.container.json
 config.proxy.container.json
 sources/
+
+config.container.toml
+config.proxy.toml
+backends.toml
+backend-installations/
+*.private-proxy-*.bak
+*.private-proxy-plan.json
+*.candidate.toml
+backend-secrets.env
+*.backup-*
+*.plan.json

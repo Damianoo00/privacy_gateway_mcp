@@ -111,6 +111,16 @@ class ProfileTests(unittest.TestCase):
                 self.assertNotEqual(first["sha256"], changed["sha256"])
                 self.assertEqual(self.paths[backend].read_text(), "Alice updated")
                 self.assertNotIn("Alice", str(changed))
+                if backend == "docx":
+                    upstream = calls[-1][2]
+                    self.assertIs(upstream["track_changes"], False)
+                    self.assertIs(upstream["allow_untracked_edit"], True)
+                    second = await self.proxy.call("docx__edit_paragraphs", {
+                        "document_id": document_id, "expected_sha256": changed["sha256"],
+                        "edits": [{"paragraph_index": 0, "new_text": token + " twice"}],
+                    })
+                    self.assertEqual(self.paths[backend].read_text(), "Alice twice")
+                    self.assertNotEqual(changed["sha256"], second["sha256"])
             self.assertEqual(len(set(tokens)), 1, "Pseudonyms must be stable within the project")
         asyncio.run(flow())
         for backend, _, arguments in calls:

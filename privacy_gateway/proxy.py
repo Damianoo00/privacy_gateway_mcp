@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import fcntl
 import hashlib
 import hmac
 import html
@@ -15,10 +14,12 @@ import secrets
 import sqlite3
 import stat
 import tempfile
+import tomllib
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 
@@ -87,9 +88,73 @@ def _index(value: Any, *, positive: bool = False) -> int:
 
 @dataclass(frozen=True)
 class Backend:
-    command: str
-    args: tuple[str, ...]
+    profile: str
     tools: tuple[str, ...]
+    command: str | None = None
+    args: tuple[str, ...] = ()
+    env: dict[str, str] | None = None
+    url: str | None = None
+    bearer_token_env: str | None = None
+    workspace_path: str | None = None
+
+
+SERVER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def parse_backend(name: str, item: dict, *, legacy: bool = False) -> Backend:
+    if not isinstance(name, str) or not SERVER_ID.fullmatch(name) or "__" in name:
+        raise ValueError("Invalid MCP server ID")
+    _object(item, {"profile", "enabled_tools", "tools", "command", "args", "env", "url", "bearer_token_env", "workspace_path"})
+    profile = item.get("profile", name if legacy else None)
+    if profile not in PROFILES:
+        raise ValueError("Unknown backend profile")
+    if "enabled_tools" in item and "tools" in item:
+        raise ValueError("Specify one tool allowlist")
+    tools = item.get("enabled_tools", item.get("tools"))
+    if not isinstance(tools, list) or not tools or any(not isinstance(t, str) or t not in PROFILES[profile] for t in tools) or len(set(tools)) != len(tools):
+        raise ValueError("Invalid tool allowlist")
+    has_url = "url" in item
+    has_command = "command" in item
+    if has_url == has_command:
+        raise ValueError("MCP server needs exactly one transport")
+    if has_url:
+        if any(k in item for k in ("args", "env")):
+            raise ValueError("HTTP MCP server cannot specify stdio settings")
+        url = item["url"]
+        if not isinstance(url, str) or len(url) > 2048 or any(c.isspace() for c in url):
+            raise ValueError("Invalid MCP server URL")
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("Invalid MCP server URL")
+        try:
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                raise ValueError("Invalid MCP server port")
+        except ValueError as exc:
+            raise ValueError("Invalid MCP server port") from exc
+        token_env = item.get("bearer_token_env")
+        if token_env is not None and (not isinstance(token_env, str) or not ENV_NAME.fullmatch(token_env)):
+            raise ValueError("Invalid bearer token environment variable")
+        workspace_path = item.get("workspace_path")
+        if workspace_path is not None:
+            if not isinstance(workspace_path, str) or "\x00" in workspace_path:
+                raise ValueError("Invalid backend workspace path")
+            remote = Path(workspace_path) if workspace_path.startswith("/") else PureWindowsPath(workspace_path)
+            if not remote.is_absolute() or ".." in remote.parts:
+                raise ValueError("Invalid backend workspace path")
+        return Backend(profile, tuple(tools), url=url, bearer_token_env=token_env, workspace_path=workspace_path)
+    if "bearer_token_env" in item or "workspace_path" in item:
+        raise ValueError("Stdio MCP server cannot specify HTTP authorization")
+    command = Path(item["command"])
+    if not command.is_absolute() or ".." in command.parts or not command.resolve().is_file():
+        raise ValueError("Backend executable must be a local absolute path")
+    args = item.get("args", [])
+    env = item.get("env", {})
+    if not isinstance(args, list) or any(not isinstance(a, str) or "\x00" in a for a in args):
+        raise ValueError("Invalid backend arguments")
+    if not isinstance(env, dict) or any(not isinstance(k, str) or not ENV_NAME.fullmatch(k) or not isinstance(v, str) or "\x00" in v for k, v in env.items()):
+        raise ValueError("Invalid backend environment")
+    return Backend(profile, tuple(tools), str(command), tuple(args), dict(env))
 
 
 @dataclass(frozen=True)
@@ -102,8 +167,10 @@ class Document:
 
 class ProxyConfig:
     def __init__(self, raw: dict):
-        _object(raw, {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "documents"},
-                {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "backends", "documents"})
+        _object(raw, {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "mcp_servers", "documents"},
+                {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars"})
+        if "backends" in raw and "mcp_servers" in raw:
+            raise ValueError("Specify one MCP server map")
         self.roots = tuple(Path(p) for p in raw["source_roots"])
         if not self.roots or any(not p.is_absolute() or ".." in p.parts or not p.is_dir() or p.is_symlink() for p in self.roots):
             raise ValueError("Invalid source roots")
@@ -124,42 +191,27 @@ class ProxyConfig:
         self.timeout = _index(raw.get("timeout_seconds", 30), positive=True)
         if not 0 <= self.threshold <= 1 or not re.fullmatch("[A-Za-z0-9_-]+", self.scope) or self.timeout > 300:
             raise ValueError("Invalid proxy policy")
-        self.backends = {}
-        for name, item in raw["backends"].items():
-            if name not in PROFILES:
-                raise ValueError("Unknown backend profile")
-            _object(item, {"command", "args", "tools"}, {"command", "args", "tools"})
-            command = Path(item["command"])
-            if not command.is_absolute() or ".." in command.parts or not command.resolve().is_file():
-                raise ValueError("Backend executable must be a local absolute path")
-            args = item["args"]
-            tools = item["tools"]
-            if not isinstance(args, list) or any(not isinstance(a, str) or "\x00" in a for a in args):
-                raise ValueError("Invalid backend arguments")
-            if not isinstance(tools, list) or not tools or any(t not in PROFILES[name] for t in tools) or len(set(tools)) != len(tools):
-                raise ValueError("Invalid tool allowlist")
-            # Preserve the configured interpreter path: resolving a virtualenv's
-            # Python symlink would run system Python without its dependencies.
-            self.backends[name] = Backend(str(command), tuple(args), tuple(tools))
+        servers = raw.get("mcp_servers", raw.get("backends", {}))
+        if not isinstance(servers, dict):
+            raise ValueError("Invalid MCP server map")
+        self.backends = {name: parse_backend(name, item, legacy="backends" in raw) for name, item in servers.items()}
         self.documents = {}
         seen_paths = set()
         seen_files = set()
-        for item in raw["documents"]:
+        for item in raw.get("documents", []):
             _object(item, {"id", "path", "backend", "sheets"}, {"id", "path", "backend"})
             ident, path, backend = item["id"], Path(item["path"]), item["backend"]
-            if not isinstance(ident, str) or not DOC_ID.fullmatch(ident) or ident in self.documents or backend not in self.backends or not path.is_absolute() or ".." in path.parts or path.suffix.lower() not in SUFFIXES[backend]:
+            if not isinstance(ident, str) or not DOC_ID.fullmatch(ident) or ident in self.documents or backend not in self.backends or not path.is_absolute() or ".." in path.parts or path.suffix.lower() not in SUFFIXES[self.backends[backend].profile]:
                 raise ValueError("Invalid document registration")
             sheets = item.get("sheets", {})
             if not isinstance(sheets, dict) or any(not re.fullmatch("[A-Za-z0-9_-]{1,64}", k) or not isinstance(v, str) or not v or len(v) > 31 for k, v in sheets.items()) or len(set(sheets.values())) != len(sheets):
                 raise ValueError("Invalid sheet aliases")
-            if backend == "excel" and not sheets:
+            if self.backends[backend].profile == "excel" and not sheets:
                 raise ValueError("Excel documents need explicit sheet aliases")
             if path in seen_paths:
                 raise ValueError("Duplicate document path")
             seen_paths.add(path)
             self.documents[ident] = Document(ident, path, backend, sheets)
-        if not self.documents:
-            raise ValueError("No registered documents")
         self.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.workspace.resolve() != self.workspace or any(root.resolve() != root for root in self.roots):
             raise ValueError("Symlink in configured directory")
@@ -175,7 +227,8 @@ class ProxyConfig:
 
     @classmethod
     def load(cls, path: str) -> "ProxyConfig":
-        return cls(json.loads(Path(path).read_text(encoding="utf-8")))
+        return cls(load_config_file(path))
+
 
     def source(self, doc: Document) -> bytes:
         """Open every path component without following a link, then read a regular file."""
@@ -202,6 +255,11 @@ class ProxyConfig:
                     os.close(fd)
         except Exception as exc:
             raise _deny() from exc
+
+
+def load_config_file(path: str) -> dict:
+    data = Path(path).read_bytes()
+    return tomllib.loads(data.decode("utf-8")) if Path(path).suffix.lower() == ".toml" else json.loads(data)
 
 
 class Vault:
@@ -274,9 +332,17 @@ class PrivacyProxy:
     def public_tools(self) -> list[str]:
         return [f"{name}__{tool}" for name, backend in self.config.backends.items() for tool in backend.tools]
 
+    def _backend_path(self, backend: Backend, local_path: str) -> str:
+        if backend.workspace_path is None:
+            return local_path
+        relative = Path(local_path).relative_to(self.config.workspace)
+        root = Path(backend.workspace_path) if backend.workspace_path.startswith("/") else PureWindowsPath(backend.workspace_path)
+        return str(root.joinpath(*relative.parts))
+
     def _validate(self, doc: Document, tool: str, arguments: dict) -> tuple[str, dict]:
-        kind, fields = PROFILES[doc.backend][tool]
-        _object(arguments, set(fields) | {"document_id", "expected_sha256"}, {"document_id"} | REQUIRED.get(doc.backend, {}).get(tool, set()) | ({"expected_sha256"} if kind == "write" else set()))
+        profile = self.config.backends[doc.backend].profile
+        kind, fields = PROFILES[profile][tool]
+        _object(arguments, set(fields) | {"document_id", "expected_sha256"}, {"document_id"} | REQUIRED.get(profile, {}).get(tool, set()) | ({"expected_sha256"} if kind == "write" else set()))
         if arguments["document_id"] != doc.ident:
             raise _deny()
         if kind == "write" and (not isinstance(arguments["expected_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", arguments["expected_sha256"])):
@@ -348,14 +414,20 @@ class PrivacyProxy:
                             raise _deny()
                     rows.append(cells)
                 out[name] = rows
-        if doc.backend == "excel":
+        if profile == "docx" and tool == "edit_paragraphs":
+            # A tracked edit leaves pending revisions, and this upstream rejects
+            # the next edit of that paragraph. Use its explicit untracked mode
+            # for repeatable plain-text edits through the gateway.
+            out["track_changes"] = False
+            out["allow_untracked_edit"] = True
+        elif profile == "excel":
             out["fileAbsolutePath"] = ""  # replaced by transaction path
             if tool == "excel_write_to_sheet":
                 out["newSheet"] = False
             if tool == "excel_read_sheet":
                 out["showFormula"] = False
                 out["showStyle"] = False
-        elif doc.backend == "filesystem" and tool == "read_text_file" and "head" in out and "tail" in out:
+        elif profile == "filesystem" and tool == "read_text_file" and "head" in out and "tail" in out:
             raise _deny()
         return kind, out
 
@@ -446,6 +518,7 @@ class PrivacyProxy:
         return text
 
     def _result(self, doc: Document, result: Any, path: str, tool: str) -> dict:
+        profile = self.config.backends[doc.backend].profile if doc.backend in self.config.backends else doc.backend
         if result.isError or getattr(result, "meta", None) or getattr(result, "_meta", None):
             raise _deny()
         content = []
@@ -453,7 +526,7 @@ class PrivacyProxy:
         for item in result.content:
             if item.type != "text" or getattr(item, "_meta", None) or getattr(item, "meta", None):
                 raise _deny()
-            if doc.backend == "pptx":
+            if profile == "pptx":
                 try:
                     envelope = json.loads(item.text)
                 except (ValueError, TypeError) as exc:
@@ -464,9 +537,9 @@ class PrivacyProxy:
                 decoded = json.loads(item.text)
             except (ValueError, TypeError):
                 decoded = None
-            if doc.backend == "excel" and tool == "excel_describe_sheets":
+            if profile == "excel" and tool == "excel_describe_sheets":
                 safe_text = json.dumps(self._safe_value(doc, self._excel_describe(doc, decoded), path), ensure_ascii=False)
-            elif doc.backend == "excel" and tool in ("excel_read_sheet", "excel_write_to_sheet"):
+            elif profile == "excel" and tool in ("excel_read_sheet", "excel_write_to_sheet"):
                 safe_text = self._safe_text(doc, self._html_decode_bounded(self._excel_html(doc, item.text)), path)
             elif isinstance(decoded, (dict, list)):
                 safe_text = json.dumps(self._safe_value(doc, decoded, path), ensure_ascii=False)
@@ -480,7 +553,7 @@ class PrivacyProxy:
             content.append({"type": "text", "text": safe_text})
         structured = getattr(result, "structuredContent", None)
         if structured is not None:
-            if doc.backend == "excel" and tool == "excel_describe_sheets":
+            if profile == "excel" and tool == "excel_describe_sheets":
                 structured = self._excel_describe(doc, structured)
             structured = self._safe_value(doc, structured, path)
             if len(json.dumps(structured, ensure_ascii=False)) + total_chars > self.config.max_output:
@@ -491,6 +564,7 @@ class PrivacyProxy:
 
     @asynccontextmanager
     async def _file_lock(self, doc: Document):
+        import fcntl
         lock_path = self.config.workspace / (hashlib.sha256(str(doc.path).encode()).hexdigest() + ".lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         acquired = False
@@ -529,7 +603,9 @@ class PrivacyProxy:
                     with tempfile.TemporaryDirectory(prefix="proxy-", dir=self.config.workspace) as tmp:
                         path = str(Path(tmp) / ("document" + doc.path.suffix.lower()))
                         Path(path).write_bytes(original)
-                        upstream[PATH_KEYS[backend]] = path
+                        backend_config = self.config.backends[backend]
+                        remote_path = self._backend_path(backend_config, path)
+                        upstream[PATH_KEYS[backend_config.profile]] = remote_path
                         async with self.backend_locks[backend]:
                             if backend in self.failed_backends:
                                 raise _deny()
@@ -538,7 +614,7 @@ class PrivacyProxy:
                             except Exception:
                                 self.failed_backends.add(backend)
                                 raise
-                        safe = self._result(doc, result, path, tool)
+                        safe = self._result(doc, result, remote_path, tool)
                         if kind == "write":
                             changed_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                             try:
@@ -651,6 +727,8 @@ def _upstream_compatible(backend: str, tool: str, schema: dict) -> bool:
         upstream |= {"newSheet"}
     if backend == "excel" and tool == "excel_read_sheet":
         upstream |= {"showFormula", "showStyle"}
+    if backend == "docx" and tool == "edit_paragraphs":
+        upstream |= {"track_changes", "allow_untracked_edit"}
     required = set(schema.get("required", []))
     return upstream <= set(schema["properties"]) and required <= upstream
 
@@ -667,13 +745,13 @@ def proxy_server(proxy: PrivacyProxy):
         tools = []
         for name, backend in proxy.config.backends.items():
             for tool in backend.tools:
-                schema = _public_schema(name, tool)
+                schema = _public_schema(backend.profile, tool)
                 schema["properties"]["document_id"]["enum"] = [d.ident for d in proxy.config.documents.values() if d.backend == name]
                 if "sheet" in schema["properties"]:
                     aliases = sorted({alias for d in proxy.config.documents.values() if d.backend == name for alias in d.sheets})
                     schema["properties"]["sheet"]["enum"] = aliases
-                kind = PROFILES[name][tool][0]
-                tools.append(types.Tool(name=f"{name}__{tool}", description=f"{kind.title()} registered {name} document content through the privacy gateway.", inputSchema=schema))
+                kind = PROFILES[backend.profile][tool][0]
+                tools.append(types.Tool(name=f"{name}__{tool}", description=f"{kind.title()} registered {backend.profile} document content through the privacy gateway.", inputSchema=schema))
         return tools
 
     # Upstream sessions and source copy/write operations are shared across HTTP
@@ -693,28 +771,46 @@ def proxy_server(proxy: PrivacyProxy):
     return server
 
 
-@asynccontextmanager
-async def proxy_backends(proxy: PrivacyProxy):
-    """Start validated local backend sessions for the lifetime of the server."""
-    from contextlib import AsyncExitStack
+async def connect_backend(stack, backend: Backend, timeout: int):
+    """Open one approved upstream transport and return its initialized session."""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+    if backend.url is not None:
+        import httpx
+        from mcp.client.streamable_http import streamable_http_client
+        headers = {}
+        if backend.bearer_token_env:
+            token = os.environ.get(backend.bearer_token_env)
+            if not token or "\r" in token or "\n" in token:
+                raise ValueError("Missing MCP bearer token")
+            headers["Authorization"] = "Bearer " + token
+        client = await stack.enter_async_context(httpx.AsyncClient(headers=headers, timeout=timeout,
+                                                                follow_redirects=False, trust_env=False))
+        streams = await stack.enter_async_context(streamable_http_client(backend.url, http_client=client))
+    else:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"),
+               "PPTX_MCP_AUTO_RENDER": "0", "NO_COLOR": "1", **(backend.env or {})}
+        params = StdioServerParameters(command=backend.command, args=list(backend.args), env=env)
+        errlog = stack.enter_context(open(os.devnull, "w"))
+        streams = await stack.enter_async_context(stdio_client(params, errlog=errlog))
+    session = await stack.enter_async_context(ClientSession(*streams[:2]))
+    await asyncio.wait_for(session.initialize(), timeout=timeout)
+    listed = await asyncio.wait_for(session.list_tools(), timeout=timeout)
+    found = {t.name: t for t in listed.tools}
+    for tool in backend.tools:
+        if tool not in found or not _upstream_compatible(backend.profile, tool, found[tool].inputSchema):
+            raise RuntimeError("Configured upstream schema incompatible")
+    return session, found
+
+
+@asynccontextmanager
+async def proxy_backends(proxy: PrivacyProxy):
+    """Connect approved external backends for the lifetime of the proxy."""
+    from contextlib import AsyncExitStack
 
     async with AsyncExitStack() as stack:
         for name, backend in proxy.config.backends.items():
-            params = StdioServerParameters(command=backend.command, args=list(backend.args), env={
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(proxy.config.workspace),
-                "PPTX_MCP_AUTO_RENDER": "0", "NO_COLOR": "1",
-            })
-            errlog = stack.enter_context(open(os.devnull, "w"))
-            streams = await stack.enter_async_context(stdio_client(params, errlog=errlog))
-            session = await stack.enter_async_context(ClientSession(*streams))
-            await asyncio.wait_for(session.initialize(), timeout=proxy.config.timeout)
-            listed = await asyncio.wait_for(session.list_tools(), timeout=proxy.config.timeout)
-            found = {t.name: t for t in listed.tools}
-            for tool in backend.tools:
-                if tool not in found or not _upstream_compatible(name, tool, found[tool].inputSchema):
-                    raise RuntimeError("Configured upstream schema incompatible")
+            session, _ = await connect_backend(stack, backend, proxy.config.timeout)
             proxy.sessions[name] = session
 
         try:

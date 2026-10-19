@@ -35,12 +35,50 @@ def main() -> None:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--allow-non-loopback", action="store_true",
                        help="Allow unauthenticated HTTP outside loopback; only behind a protected network boundary")
+    bridge = sub.add_parser("bridge", help="Serve one approved native stdio MCP server over HTTP")
+    bridge.add_argument("--config", required=True)
+    bridge.add_argument("--server", required=True)
+    bridge.add_argument("--host", default="127.0.0.1")
+    bridge.add_argument("--port", type=int, default=8101)
+    bridge.add_argument("--bearer-token-env", required=True,
+                        help="Environment variable containing the bridge HTTP bearer token")
+    bridge.add_argument("--allowed-host", action="append", default=[],
+                        help="Additional HTTP Host accepted by the bridge, e.g. host.docker.internal:*")
     args = parser.parse_args()
     try:
         if args.command == "init-key":
             fd = os.open(args.key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(secrets.token_bytes(32))
+            return
+        if args.command == "bridge":
+            from .bridge import StdioBridge
+            from .proxy import load_config_file, parse_backend
+            from .http import serve_http
+            import ipaddress
+            import re
+
+            raw = load_config_file(args.config)
+            servers = raw.get("mcp_servers", raw.get("backends", {}))
+            if not isinstance(servers, dict) or args.server not in servers:
+                raise ValueError("Unknown MCP server")
+            backend = parse_backend(args.server, servers[args.server], legacy="backends" in raw)
+            bridge = StdioBridge(backend)
+            token = os.environ.get(args.bearer_token_env)
+            if not token or "\r" in token or "\n" in token:
+                raise ValueError("Invalid bridge bearer token")
+            loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
+            if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::(?:[0-9]{1,5}|\*))?", host)
+                   for host in args.allowed_host):
+                raise ValueError("Invalid allowed Host")
+
+            async def run_bridge():
+                async with bridge.connected():
+                    await serve_http(bridge.server(), args.host, args.port,
+                                     allow_non_loopback=not loopback, bearer_token=token,
+                                     allowed_hosts=args.allowed_host)
+
+            asyncio.run(run_bridge())
             return
         from .proxy import PrivacyProxy, ProxyConfig, proxy_backends, proxy_server
         from .http import serve_http

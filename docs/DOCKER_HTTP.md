@@ -1,106 +1,102 @@
-# Proxy MCP przez Docker i Streamable HTTP
+# Private proxy: Docker + zewnętrzne serwery MCP
 
-Bramka działa jako jeden serwis `gateway` na Windows, Linux i macOS. Wymaga
-Docker Engine z Compose v2 na Linuksie albo Docker Desktop z kontenerami
-linuksowymi na Windows/macOS. Endpoint klienta: `http://localhost:8000/mcp`.
+Obraz zawiera **tylko nasze proxy i model detekcji PII**. Zewnętrzne serwery MCP
+instaluje się osobno i dodaje w konfiguracji, bez przebudowywania obrazu proxy.
 
-## Przygotowanie obrazu i konfiguracji
-
-**Bazowy Dockerfile nie zawiera zewnętrznych backendów Office ani filesystem.**
-Przed uruchomieniem operator musi przygotować obraz zawierający wybrane,
-przypięte wersje serwerów MCP i ich środowiska, np. Node.js. Bazowy obraz można
-zbudować poleceniem `docker build -t privacy-gateway:base .`, a następnie rozszerzyć
-własnym Dockerfile. Docelowy obraz nazwij `privacy-gateway:local` albo ustaw jego
-nazwę w `PG_IMAGE`. Instalacje i model pobieraj podczas budowania, nie przy starcie.
-Binaria backendów muszą odpowiadać architekturze obrazu, także na Apple Silicon.
-
-1. Skopiuj `.env.example` jako `.env` i `config.container.example.json` jako
-   `config.container.json`.
-2. Utwórz katalog `sources` i włóż do niego kopie dokumentów do prób.
-   Inny katalog ustaw przez `PG_SOURCES` w `.env`, np.
-   `PG_SOURCES=C:/Users/Jan/Documents/Do analizy` na Windows.
-3. W konfiguracji usuń nieużywane backendy i dokumenty. Przykładowe `command`
-   oraz `args` zastąp ścieżkami istniejącymi **w przygotowanym obrazie**.
-   Domyślne ścieżki danych to `/sources` i `/data/workspace`.
-   Serwer filesystem musi dopuszczać `/data/workspace`.
-4. Zdefiniuj `documents` z publicznymi identyfikatorami, ścieżkami pod `/sources`
-   i aliasami arkuszy Excela. Nie ma komendy rejestracji dokumentów: konfiguracja
-   operatora jest jedyną listą udostępnianych plików. Po jej zmianie zrestartuj bramkę.
-5. Zapewnij UID 1000 możliwość odczytu i zapisu katalogu źródłowego. Proxy edytuje
-   dokumenty, więc źródła są montowane jako zapisywalne. Workspace i klucz są
-   w prywatnym wolumenie; backendy powinny pracować na kopiach w workspace.
-
-Obraz bazowy zawiera angielski model `en_core_web_lg`. Polski wymaga instalacji
-zgodnego modelu podczas budowania obrazu i zmiany języka oraz encji w konfiguracji.
-Brak backendu, modelu lub zgodnego schematu narzędzi blokuje start.
-
-## Pierwszy start
-
-Z katalogu repozytorium, w PowerShell lub powłoce Linux/macOS:
+## Uruchomienie proxy
 
 ```console
-docker compose --profile setup run --rm bootstrap
-docker compose up -d gateway
+docker compose up -d --build
 docker compose ps
+docker compose exec gateway python -m privacy_gateway.smoke
 ```
 
-`bootstrap` to jednorazowe zadanie tworzące klucz, a nie drugi stale działający
-serwis. Wykonaj je tylko raz dla nowego wolumenu. Istniejącego klucza nie nadpisuje.
+Wymagany Docker z Compose v2 i kontenerami linuksowymi. Nie trzeba kopiować plików
+na pierwszy start: domyślne `config.container.example.toml` ma pustą mapę serwerów
+i listę dokumentów. Wynik `0 available tools` jest wtedy prawidłowy. Endpoint dla
+Codexa: `http://127.0.0.1:8000/mcp` (Streamable HTTP).
 
-W lokalnym kliencie MCP wybierz Streamable HTTP i URL `http://localhost:8000/mcp`.
-Składnia konfiguracji zależy od klienta. Klient w chmurze nie ma dostępu do Twojego
-`localhost`. Po restarcie bramki klient musi ponowić połączenie. Nie powtarzaj
-automatycznie zapisu dokumentu po błędzie lub zerwaniu połączenia.
+Klucz jest tworzony automatycznie w trwałym `private_data`; nie jest nadpisywany.
+Obraz nie zawiera demonstracyjnych dokumentów ani backendów DOCX/XLSX/PPTX/filesystem.
+Sam stan `healthy` nie potwierdza routingu i filtrowania dokumentów.
 
-## Autostart, dane i aktualizacje
+## Dodanie serwerów
 
-Na Windows/macOS w Docker Desktop włącz **Settings → General → Start Docker
-Desktop when you sign in to your computer**. Jest to start po zalogowaniu.
-Na Linuksie skonfiguruj start silnika Docker wraz z systemem.
+Najwygodniej wykonać instalację z przygotowanym
+[skillem private-proxy-setup](../skills/private-proxy-setup/SKILL.md).
 
-Polityka `restart: unless-stopped` uruchamia wcześniej utworzony kontener po
-restarcie silnika, jeśli nie zatrzymano go ręcznie. `/healthz` sprawdza odpowiedź
-HTTP; nie sprawdza wszystkich backendów i jakości anonimizacji. Status `unhealthy`
-sam w sobie nie powoduje restartu kontenera.
+1. Skopiuj `.env.example` do `.env`, a `config.container.example.toml` do
+   `config.container.toml`; ustaw `PG_CONFIG=./config.container.toml`.
+2. Zainstaluj wybrane backendy poza obrazem proxy. W konfiguracji użyj `url` dla
+   zewnętrznego MCP HTTP. Serwer stdio na hoście można wystawić za pomocą naszej
+   osobnej komendy `bridge`; nie dodawaj jego adresu bezpośrednio do Codexa.
+3. Ustaw `PG_SOURCES` na zatwierdzony katalog źródeł i `PG_WORKSPACE` na osobny,
+   prywatny katalog roboczy hosta. UID 1000 musi móc w nim czytać i pisać. Backendy
+   muszą widzieć te same kopie robocze; samo podanie adresu URL nie współdzieli plików.
+4. Dodaj wpisy `mcp_servers`, `documents` i aliasy arkuszy. Przykład:
+
+```toml
+[mcp_servers.files]
+profile = "filesystem"
+url = "http://host.docker.internal:8101/mcp"
+bearer_token_env = "FILES_BACKEND_TOKEN"
+workspace_path = "/home/operator/private-proxy-workspace"
+enabled_tools = ["read_text_file", "edit_file"]
+
+[[documents]]
+id = "doc_text_12345678"
+path = "/sources/note.txt"
+backend = "files"
+```
+
+Usuń początkowe `documents = []` przed dopisaniem tabel `[[documents]]`.
+Sekrety przekaż przez prywatny plik środowiska i `PG_BACKEND_ENV_FILE`; domyślnie
+Compose używa pustego `backend-secrets.example.env`. Nie wpisuj wartości tokenów
+do repozytorium. Narzędzia w Codexie będą miały nazwy np. `files__read_text_file`.
+
+Przy zmianie zawartości konfiguracji zrestartuj proxy. Przy zmianie mountów,
+zmiennych lub `.env` odtwórz kontener:
 
 ```console
-docker compose logs --tail 50 gateway
-docker compose stop gateway
-docker compose up -d gateway
+docker compose up -d --force-recreate gateway
 ```
 
-Klucz i szyfrowany rejestr tokenów są w wolumenie `privacy-gateway_private_data`.
-Nie usuwaj go ani nie wykonuj `docker compose down -v`, jeśli chcesz zachować dane.
-Kopia wolumenu zawiera także klucz i wymaga ochrony. Przed aktualizacją zatrzymaj
-bramkę i wykonaj kopię wolumenu, potem zbuduj nowy obraz i wykonaj `up -d`.
-Port hosta można zmienić przez `PG_PORT` w `.env` i odtworzenie kontenera.
+Lista wystawianych narzędzi pochodzi z konfiguracji i walidacji odkrytego schematu
+backendu. Obsługiwane profile: DOCX, Excel, PPTX i filesystem. Dowolne inne narzędzia
+wymagają profilu/polityki; bramka nie otwiera niesprawdzonego passthrough.
 
-Jeżeli używałeś poprzedniej konfiguracji z `gateway-proxy`, najpierw zatrzymaj
-stary kontener i usuń go poleceniem `docker compose rm gateway-proxy` przy użyciu
-starego pliku Compose. Zachowaj wolumen danych. W nowej konfiguracji nie ma profili
-`proxy` ani `extraction`, a jedyną komendą serwera jest `serve`.
+Szczegóły instalacji backendów, bridge, współdzielenia ścieżek Windows/Linux/macOS
+oraz testów odczyt–edycja–ponowny odczyt są w
+[instrukcji skilla](../skills/private-proxy-setup/references/servers.md).
 
-## Granica dostępu
+## Codex i dostęp do dokumentów
 
-HTTP nie ma uwierzytelniania. Każdy lokalny proces z dostępem do portu może wywołać
-narzędzia. Compose publikuje port tylko pod `127.0.0.1`. Kontrole Host/Origin nie
-zastępują uwierzytelniania. Nie zmieniaj mapowania na publiczny adres bez dodania
-uwierzytelniania i TLS. Endpoint ma jeden zakres dostępu, nie izoluje użytkowników.
+Skill przygotowuje kandydata centralnego `config.toml`, następnie po weryfikacji
+robi kopię oryginału i stosuje zmianę. Wyłącza bezpośrednie MCP oraz znane narzędzia
+omijające proxy i ustawia profil odmowy dostępu do chronionych ścieżek. Wymagany
+restart Codexa oraz test odmowy odczytu — `read-only` nadal pozwala czytać.
 
-Sieć `internal: true` umożliwia HTTP, ale nie zastępuje `--network none`.
-Dostęp do hosta i kontenerów tej sieci zależy od ustawień Dockera. Backendy muszą
-być zaufane i mieć minimalne uprawnienia. Nie montuj całego katalogu domowego ani
-gniazda Dockera.
+Konfiguracja użytkownika nie zastępuje izolacji systemowej. Dla twardej gwarancji
+Codex powinien działać jako inne konto lub w środowisku bez mountów dokumentów,
+workspace, klucza, danych backendów i gniazda Dockera. Udostępnij mu tylko endpoint
+proxy. Instrukcje, kopie zapasowe i przywracanie opisano w
+[procedurze migracji](../skills/private-proxy-setup/references/codex.md).
 
-Na systemie zgodnym z obecnym kodem uniksowym można też uruchomić proxy bez Dockera:
+## Sieć, dane i autostart
 
-```console
-privacy-gateway serve --config config.proxy.json --key-file gateway.key --host 127.0.0.1 --port 8000
-```
+Proxy publikuje port tylko na loopback hosta. HTTP proxy nie ma uwierzytelniania;
+lokalne procesy mogą z niego korzystać. Nie udostępniaj go publicznie bez osobnego
+uwierzytelniania/TLS. Klient w chmurze nie połączy się z Twoim localhost.
 
-Nasłuch poza loopback wymaga jawnego `--allow-non-loopback`; Compose używa tej
-opcji wewnątrz kontenera z lokalnym mapowaniem portu. Nie dodaje ona uwierzytelniania.
-Wariant przenośny dla trzech systemów korzysta z kontenera Linux.
+Host bridge przetwarza niesanitowane dane: wymaga tokenu również lokalnie i musi
+być odseparowany od Codexa. Ogranicz dostęp backendów do współdzielonego workspace.
+Standardowa sieć bridge kontenera pozwala na połączenia wychodzące; nie jest zaporą.
 
-Transport przetestowano z syntetycznym backendem. Obraz z rzeczywistymi serwerami
-Office wymaga próby odczyt–edycja–ponowny odczyt na reprezentatywnych dokumentach.
+Na Windows/macOS włącz start Docker Desktop po zalogowaniu. Na Ubuntu skonfiguruj
+start silnika Docker wraz z systemem. `restart: unless-stopped` uruchomi utworzony
+kontener po starcie silnika, jeśli wcześniej nie zatrzymano go ręcznie.
+
+Nie wykonuj `docker compose down -v`, jeśli chcesz zachować klucz, rejestr i dane.
+`private_data` zawiera klucz, a `work_data` prywatny workspace i szyfrowany rejestr.
+Nie udostępniaj wolumenu klucza backendom. Przy migracji ze starego układu zachowaj
+stary wolumen i konfigurację; nie kasuj ich jako sposobu naprawy błędu startu.

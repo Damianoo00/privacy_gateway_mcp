@@ -1,77 +1,90 @@
 # Privacy MCP Gateway
 
-## Docker + Streamable HTTP na Windows, Linux i macOS
+Lokalne proxy prywatności MCP: **Codex → nasze proxy → skonfigurowane serwery MCP**.
+Proxy filtruje odpowiedzi i wykonuje routing, a backendy instaluje się osobno.
+Dockerfile nie zawiera zewnętrznych serwerów Office ani filesystem.
 
-Nowy sposób uruchamiania opisuje [instrukcja Docker Compose](docs/DOCKER_HTTP.md).
-Bramka działa niezależnie od klienta MCP pod `http://localhost:8000/mcp`.
-Compose udostępnia port wyłącznie na lokalnym komputerze i przechowuje klucz oraz
-bazę w trwałym wolumenie. Publicznym transportem bramki jest wyłącznie Streamable HTTP.
-Kontener używa Linuksa na wszystkich trzech systemach; nie jest to natywny port Pythona na Windows.
-
-## Proxy MCP
-
-`serve` udostępnia wybrane lokalne narzędzia istniejących serwerów MCP dla zarejestrowanych dokumentów DOCX, XLSX, PPTX oraz TXT/MD/CSV/HTML. Konfigurację operatora pokazuje [config.proxy.example.json](config.proxy.example.json). Zastąp ścieżki przykładowe rzeczywistymi, absolutnymi ścieżkami do lokalnie zainstalowanych i przypiętych wersji serwerów. Nie uruchamiaj `npx --yes` ani instalacji z sieci przy starcie bramki. Podane w przykładzie ścieżki instalacji i pliki wykonywalne trzeba dostosować do przypiętych wersji; bramka sprawdza obecność i wymagany schemat narzędzi przy starcie. Python MCP SDK wymaga wersji 1.26–1.x.
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install .
-.venv/bin/python -m spacy download en_core_web_lg
-cp config.proxy.example.json config.proxy.json
-chmod 600 config.proxy.json
+```console
+docker compose up -d --build
 ```
 
-Zainstaluj osobno lokalne wersje [knorq DOCX](https://github.com/knorq-ai/docx-mcp-server), [negokaz Excel](https://github.com/negokaz/excel-mcp-server), [knorq PPTX](https://github.com/knorq-ai/pptx-mcp-server) i [MCP filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem). Przykład zakłada zbudowany plik Node dla DOCX i filesystem, plik wykonywalny Go dla Excela oraz lokalny skrypt CLI Pythona dla PPTX. Ustaw ścieżki do tych konkretnych instalacji w `config.proxy.json`, a także dokumenty, katalog źródeł, prywatny workspace i aliasy arkuszy.
+Endpoint: `http://127.0.0.1:8000/mcp` (Streamable HTTP). Domyślnie proxy startuje bez
+serwerów i dokumentów; dodaje się je w pliku konfiguracyjnym bez zmiany obrazu.
+[Uruchomienie Docker](docs/DOCKER_HTTP.md).
 
-Usuń nieużywane backendy i dokumenty z konfiguracji. Przykład używa modelu angielskiego; dla polskiego ustaw `language: pl`, zainstalowany lokalnie model spaCy oraz encje obsługiwane w tym języku. Brak modelu lub wymaganego detektora blokuje start.
+## Instalacja przez skilla
 
-```sh
-.venv/bin/privacy-gateway init-key /secure/path/gateway.key
-.venv/bin/privacy-gateway serve --config config.proxy.json --key-file /secure/path/gateway.key
+[private-proxy-setup](skills/private-proxy-setup/SKILL.md) prowadzi przez instalację
+proxy i backendów, test filtrowania oraz migrację centralnego `config.toml` Codexa.
+Helper najpierw przygotowuje plan i kandydata, następnie robi dokładny backup przed
+nadpisaniem. Nie stosuje zmian przy samym tworzeniu/instalacji skilla.
+
+Skill wyłącza bezpośrednie integracje i narzędzia wykonawcze, ustawia profil odmowy
+odczytu i wymaga weryfikacji po restarcie. Nie zastępuje izolacji systemowej Codexa.
+Samo `read-only` nie blokuje czytania dokumentów.
+
+## Konfiguracja serwerów
+
+JSON i TOML obsługują `mcp_servers` z własnymi nazwami, podobnie jak konfiguracja
+Codexa. Każdy serwer ma dodatkowo `profile` i listę `enabled_tools`. Przykłady:
+
+```toml
+[mcp_servers.word_local]
+profile = "docx"
+url = "http://private-backend:8102/mcp"
+bearer_token_env = "WORD_BACKEND_TOKEN"
+enabled_tools = ["read_document", "edit_paragraphs"]
 ```
 
-`documents` jest listą nadaną przez operatora. Każdy publiczny `doc_…` wskazuje dokładnie jeden istniejący plik z `source_roots`. Klient MCP nie otrzymuje ścieżki. Dla Excela `sheets` przypisuje publiczne aliasy wszystkim arkuszom, które mają być dostępne. Każdy backend ma jawną listę `tools`; wbudowane profile dopuszczają tylko:
+Dla natywnego proxy serwer może zamiast `url` mieć `command`, `args` i opcjonalne
+`env`. Komendy hosta nie są wykonywalne w kontenerze proxy. Serwery stdio można
+uruchamiać poza nim za pomocą `privacy-gateway bridge`, z uwierzytelnianiem HTTP.
+Zewnętrzny backend musi widzieć tę samą kopię roboczą; `workspace_path` pozwala
+mapować jej ścieżkę na host Windows/Linux/macOS.
 
-| Backend | Odczyt | Edycja |
+Przykładowe pliki: [kontener TOML](config.container.example.toml),
+[kontener JSON](config.container.example.json),
+[dotychczasowa konfiguracja natywna JSON](config.proxy.example.json).
+Stara mapa `backends` jest nadal odczytywana; nie łącz jej z `mcp_servers`.
+
+| Profil | Odczyt | Edycja |
 | --- | --- | --- |
-| `docx` | `read_document` | `edit_paragraphs` |
-| `excel` | `excel_describe_sheets`, `excel_read_sheet` | `excel_write_to_sheet` |
-| `pptx` | `pptx_get_info`, `pptx_read_slide` | `pptx_edit_text` |
-| `filesystem` | `read_text_file` | `edit_file` |
+| docx | read_document | edit_paragraphs |
+| excel | excel_describe_sheets, excel_read_sheet | excel_write_to_sheet |
+| pptx | pptx_get_info, pptx_read_slide | pptx_edit_text |
+| filesystem | read_text_file | edit_file |
 
-Publiczne nazwy mają prefiks, np. `docx__read_document`. Wejście ma `document_id` i zatwierdzone parametry narzędzia; `file_path`/`path`/`fileAbsolutePath` są wstrzykiwane lokalnie. Dla edycji podaj `expected_sha256` z ostatniego odczytu; `document_id` i SHA-256 są zwracane także w osobnym bloku tekstowym dla klientów bez obsługi danych strukturalnych. Konflikt wersji blokuje zapis. DOCX: `edits=[{"paragraph_index":0,"new_text":"..."}]` albo kotwica `anchor`; PPTX: `slide_index`, `shape_index`, `text` i opcjonalny `paragraph_index`; XLSX: alias `sheet`, zakres `range`, dwuwymiarowe `values` bez formuł; pliki tekstowe: `edits=[{"oldText":"...","newText":"..."}]`. Po zapisie wynik zwraca nowy SHA-256. Sprawdź wynik ponownym odczytem. Zapisy są wykonywane na prywatnej kopii, a po ponownym sprawdzeniu źródła atomowo podmieniany jest pojedynczy plik. Nie powtarzaj automatycznie zapisu po błędzie lub timeoutcie. Inni edytorzy powinni nie zmieniać plików równolegle; blokady obejmują tylko wywołania tej bramki.
+Nazwy publiczne mają prefiks nazwy serwera, np. `word_local__read_document`.
+Lista komend jest sprawdzana ze schematami odkrytymi na backendzie. Nieobsługiwane
+profile i narzędzia są odrzucane; nie ma dowolnego, niesprawdzonego passthrough.
+Dodanie konfiguracji wymaga restartu proxy.
 
-Wyniki tekstowe i wartości zagnieżdżonego JSON są filtrowane; błędy backendu są zastępowane stałym komunikatem. Presidio oraz wzorce lokalne zamieniają wykryte dane na odwracalne tokeny `[[PG:…]]` przechowywane w szyfrowanym rejestrze. Identyczny fragment dostaje ten sam token w `access_scope`, ale odtworzenie przy edycji wymaga, by token wcześniej wydano dla konkretnego dokumentu. Nieznane tokeny i tokeny wydane tylko dla innego dokumentu blokują zapis. Ścieżki, adresy URL i długie identyfikatory liczbowe w odpowiedziach dostają tokeny; całkowite liczby w JSON o długości 9–19 cyfr stają się stringiem tokenu, który przy wstawieniu jako cała komórka jest przywracany jako liczba. Formuły nie są dopuszczone. Wyniki binarne, obrazy, audio, zasoby MCP, linki do zasobów, prompty i sampling nie są wystawiane. Detekcja PII nie daje gwarancji znalezienia każdego przypadku, więc przetestuj własne dane i model przed zastosowaniem produkcyjnym.
+## Schemat ochrony dokumentów
 
-Backendy dostają ścieżki tylko do kopii roboczych. Uruchamiaj je bez dostępu do sieci, na koncie z minimalnymi uprawnieniami; skonfigurowany serwer filesystem musi mieć na swojej liście dozwolonych katalogów prywatny `workspace`, ponieważ tam powstają kopie. Bramka nie kontroluje kodu wykonywanego wewnątrz zewnętrznego backendu, który może mieć uprawnienia systemowe do oryginałów. Klient nie powinien mieć bezpośredniego dostępu do tych backendów ani do plików źródłowych.
+Operator rejestruje pliki w `documents`; klient podaje tylko `document_id`.
+Wyniki tekstowe i zagnieżdżony JSON przechodzą przez Presidio oraz reguły lokalne.
+PII zastępują odwracalne tokeny `[[PG:…]]` zapisane w szyfrowanym rejestrze. Token
+można odtworzyć przy edycji tylko dla dokumentu, dla którego go wcześniej wydano.
+Klucz pozostaje w prywatnym wolumenie; utrata klucza uniemożliwia odczyt rejestru.
 
-Wersja 0.2 nie jest jeszcze potwierdzona testem z rzeczywistymi serwerami Office w tym środowisku. Testy jednostkowe używają syntetycznego backendu; przed produkcyjną edycją dokumentów trzeba przypiąć i uruchomić backendi oraz wykonać próbę odczyt–edycja–ponowny odczyt na kopiach reprezentatywnych plików, w tym polskich danych, tabel, rewizji i nazw arkuszy.
+Edycja wymaga `expected_sha256` z ostatniego odczytu. Backend pracuje na prywatnej
+kopii, a proxy sprawdza źródło przed atomowym zastąpieniem. Błąd lub timeout nie
+uprawnia do automatycznego ponowienia zapisu. Po zapisie ponownie odczytaj dokument.
+DOCX korzysta z edycji bez nowych śledzonych rewizji. Excel wymaga publicznych
+aliasów arkuszy; formuły nie są dopuszczone. Obrazy, audio, zasoby binarne, sampling
+oraz niezatwierdzone narzędzia nie są wystawiane. PDF i OCR nie są obsługiwane.
 
-## Konfiguracja i dostęp
-
-Dokumenty rejestruje operator w liście `documents` w konfiguracji; nie ma osobnej
-komendy `register`. Bramka działa wyłącznie jako proxy przez Streamable HTTP.
-Uruchom ją jako osobny proces i połącz klienta MCP z `http://localhost:8000/mcp`.
-Dawne polecenie `serve-proxy` zastępuje `serve`.
-
-`init-key` tworzy 32 losowe bajty w pliku z uprawnieniami `0600`. Utrata klucza
-uniemożliwia odczyt szyfrowanego rejestru tokenów. W Dockerze klucz oraz workspace
-pozostają w trwałym wolumenie. Nie usuwaj go przy aktualizacji.
-
-Dla polskiego ustaw `language: pl`, zgodny lokalny model spaCy i odpowiednie encje,
-np. `PERSON`, `LOCATION`, `PESEL`, `NIP`, `REGON`. Wzorce numerów nie sprawdzają sum
-kontrolnych. Zweryfikuj detekcję na własnych danych. PDF i OCR nie są obsługiwane.
-
-HTTP nie ma uwierzytelniania: domyślny nasłuch jest lokalny. Nie udostępniaj portu
-publicznie. Kontener proxy potrzebuje zapisu w katalogu źródłowym do podmiany
-edytowanych dokumentów; pozostałe poufne katalogi powinny być niedostępne.
-MCP nie ogranicza uprawnień innych narzędzi klienta.
+Oryginały na dysku nadal mogą zawierać dane wrażliwe. Detekcja nie daje gwarancji
+znalezienia każdego przypadku; sprawdź wybrany model na własnych danych. Domyślny
+obraz ma model angielski; dla polskiego dobuduj zgodny model i ustaw język/encje.
+Izolacja hosta i uprawnień backendów pozostają konieczne.
 
 ## Testy
 
-```sh
+```console
 python3 -m unittest discover -s tests -v
 ```
 
-Testy używają deterministycznego detektora i syntetycznego backendu MCP.
-Produkcja wymaga Presidio i lokalnego modelu. Testy nie potwierdzają zgodności
-z rzeczywistymi serwerami Office ani jakości detekcji na danych użytkownika.
+Testy obejmują routing HTTP/stdio, profilowe reguły ochrony, tokeny, konflikt zapisu,
+uwierzytelnianie bridge i migrację konfiguracji na plikach tymczasowych. Zewnętrzne
+serwery testuj po ich instalacji według [skilla](skills/private-proxy-setup/SKILL.md).

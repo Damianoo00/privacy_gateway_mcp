@@ -1,0 +1,28 @@
+# Starts with no backends or documents. Configure external MCP servers after deployment.
+source_roots = ["/sources"]
+workspace = "/workspace"
+language = "en"
+spacy_model = "en_core_web_lg"
+entities = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IBAN_CODE", "LOCATION"]
+score_threshold = 0.35
+access_scope = "local-user"
+max_source_bytes = 10485760
+max_output_chars = 1000000
+timeout_seconds = 30
+documents = []
+
+[mcp_servers]
+
+# Example (uncomment after installing an external filesystem backend + bridge):
+# [mcp_servers.files]
+# profile = "filesystem"
+# url = "http://host.docker.internal:8101/mcp"
+# enabled_tools = ["read_text_file", "edit_file"]
+# bearer_token_env = "FILES_BACKEND_TOKEN"
+# workspace_path = "/home/user/private-proxy-workspace"
+#
+# [[documents]]
+# id = "doc_text_12345678"
+# path = "/sources/note.txt"
+# backend = "files"
+# Remove documents = [] above before adding [[documents]].

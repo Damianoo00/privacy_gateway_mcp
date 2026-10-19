@@ -1,0 +1,37 @@
+diff --git a/internal/tools/excel_write_to_sheet.go b/internal/tools/excel_write_to_sheet.go
+index 17a98d1..b1fff57 100644
+--- a/internal/tools/excel_write_to_sheet.go
++++ b/internal/tools/excel_write_to_sheet.go
+@@ -17,7 +17,6 @@ type ExcelWriteToSheetArguments struct {
+ 	SheetName        string     `zog:"sheetName"`
+ 	NewSheet         bool       `zog:"newSheet"`
+ 	Range            string     `zog:"range"`
+-	Values           [][]string `zog:"values"`
+ }
+ 
+ var excelWriteToSheetArgumentsSchema = z.Struct(z.Shape{
+@@ -25,7 +24,6 @@ var excelWriteToSheetArgumentsSchema = z.Struct(z.Shape{
+ 	"sheetName":        z.String().Required(),
+ 	"newSheet":         z.Bool().Required().Default(false),
+ 	"range":            z.String().Required(),
+-	"values":           z.Slice(z.Slice(z.String())).Required(),
+ })
+ 
+ func AddExcelWriteToSheetTool(server *server.MCPServer) {
+@@ -75,7 +73,15 @@ func AddExcelWriteToSheetTool(server *server.MCPServer) {
+ 
+ func handleWriteToSheet(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+ 	args := ExcelWriteToSheetArguments{}
+-	issues := excelWriteToSheetArgumentsSchema.Parse(request.Params.Arguments, &args)
++	// Zog validates homogeneous string slices, while the published MCP schema
++	// allows mixed scalar values. The manual validation below handles values.
++	otherArgs := make(map[string]any, len(request.GetArguments()))
++	for name, value := range request.GetArguments() {
++		if name != "values" {
++			otherArgs[name] = value
++		}
++	}
++	issues := excelWriteToSheetArgumentsSchema.Parse(otherArgs, &args)
+ 	if len(issues) != 0 {
+ 		return imcp.NewToolResultZogIssueMap(issues), nil
+ 	}
