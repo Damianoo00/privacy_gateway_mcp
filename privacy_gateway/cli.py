@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import secrets
 import stat
@@ -72,7 +73,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init-key", help="Create a private random key file")
     init.add_argument("key_file")
-    for name in ("register", "serve"):
+    for name in ("register", "serve", "serve-proxy"):
         command = sub.add_parser(name)
         command.add_argument("--config", required=True)
         command.add_argument("--key-file", required=True)
@@ -85,12 +86,16 @@ def main() -> None:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(secrets.token_bytes(32))
             return
+        if args.command == "serve-proxy":
+            from .proxy import PrivacyProxy, ProxyConfig, serve_proxy
+            asyncio.run(serve_proxy(PrivacyProxy(ProxyConfig.load(args.config), _key(args.key_file))))
+            return
         gateway = Gateway(Config.load(args.config), _key(args.key_file))
         if args.command == "register":
             print(gateway.register(args.source_file))
         else:
             _server(gateway).run(transport="stdio")
-    except (ValueError, GatewayError, RuntimeError, OSError):
+    except Exception:
         # Never print exception chains or source paths from libraries.
         print("Gateway initialization or operation failed", file=sys.stderr)
         raise SystemExit(1) from None
