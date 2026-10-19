@@ -5,12 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "privacy-gateway-mcp"
 version = "0.2.0"
-description = "Local privacy gateway for MCP"
+description = "Local privacy proxy for MCP backends"
 requires-python = ">=3.11,<3.15"
-dependencies = ["mcp>=1.26,<2", "presidio-analyzer>=2.2,<3", "cryptography>=44,<47"]
-
-[project.optional-dependencies]
-documents = ["python-docx>=1.1,<2", "pypdf>=5,<7", "openpyxl>=3.1,<4"]
+dependencies = ["mcp>=1.26,<2", "presidio-analyzer>=2.2,<3", "cryptography>=44,<47", "starlette>=0.27,<1", "uvicorn>=0.30,<1"]
 
 [project.scripts]
 privacy-gateway = "privacy_gateway.cli:main"

@@ -1,1 +1,1 @@
-"""Local privacy gateway. Original files are always read-only."""
+"""Privacy-filtering proxy for allowlisted MCP backends."""

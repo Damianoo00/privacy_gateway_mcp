@@ -1,0 +1,87 @@
+{
+  "source_roots": [
+    "/sources"
+  ],
+  "workspace": "/data/workspace",
+  "language": "en",
+  "spacy_model": "en_core_web_lg",
+  "entities": [
+    "PERSON",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "LOCATION"
+  ],
+  "score_threshold": 0.35,
+  "access_scope": "local-user",
+  "max_source_bytes": 10485760,
+  "max_output_chars": 1000000,
+  "timeout_seconds": 30,
+  "backends": {
+    "docx": {
+      "command": "/usr/bin/node",
+      "args": [
+        "/opt/approved/docx-mcp-server/dist/index.js"
+      ],
+      "tools": [
+        "read_document",
+        "edit_paragraphs"
+      ]
+    },
+    "excel": {
+      "command": "/opt/approved/excel-mcp-server/excel-mcp-server",
+      "args": [],
+      "tools": [
+        "excel_describe_sheets",
+        "excel_read_sheet",
+        "excel_write_to_sheet"
+      ]
+    },
+    "pptx": {
+      "command": "/opt/approved/pptx-mcp-server/.venv/bin/pptx-mcp-server",
+      "args": [],
+      "tools": [
+        "pptx_get_info",
+        "pptx_read_slide",
+        "pptx_edit_text"
+      ]
+    },
+    "filesystem": {
+      "command": "/usr/bin/node",
+      "args": [
+        "/opt/approved/server-filesystem/dist/index.js",
+        "/data/workspace"
+      ],
+      "tools": [
+        "read_text_file",
+        "edit_file"
+      ]
+    }
+  },
+  "documents": [
+    {
+      "id": "doc_public_word_001",
+      "path": "/sources/report.docx",
+      "backend": "docx"
+    },
+    {
+      "id": "doc_public_excel_001",
+      "path": "/sources/book.xlsx",
+      "backend": "excel",
+      "sheets": {
+        "sheet1": "Confidential Sheet"
+      }
+    },
+    {
+      "id": "doc_public_slides_001",
+      "path": "/sources/deck.pptx",
+      "backend": "pptx"
+    },
+    {
+      "id": "doc_public_text_001",
+      "path": "/sources/note.txt",
+      "backend": "filesystem"
+    }
+  ]
+}

@@ -138,7 +138,9 @@ class ProxyConfig:
                 raise ValueError("Invalid backend arguments")
             if not isinstance(tools, list) or not tools or any(t not in PROFILES[name] for t in tools) or len(set(tools)) != len(tools):
                 raise ValueError("Invalid tool allowlist")
-            self.backends[name] = Backend(str(command.resolve()), tuple(args), tuple(tools))
+            # Preserve the configured interpreter path: resolving a virtualenv's
+            # Python symlink would run system Python without its dependencies.
+            self.backends[name] = Backend(str(command), tuple(args), tuple(tools))
         self.documents = {}
         seen_paths = set()
         seen_files = set()
@@ -653,13 +655,50 @@ def _upstream_compatible(backend: str, tool: str, schema: dict) -> bool:
     return upstream <= set(schema["properties"]) and required <= upstream
 
 
-async def serve_proxy(proxy: PrivacyProxy) -> None:
-    """Serve only locally generated tool definitions over MCP stdio."""
-    from contextlib import AsyncExitStack
-    from mcp import ClientSession, StdioServerParameters, types
-    from mcp.client.stdio import stdio_client
+def proxy_server(proxy: PrivacyProxy):
+    """Create public MCP tools for the HTTP server."""
+    from mcp import types
     from mcp.server.lowlevel import Server
-    from mcp.server.stdio import stdio_server
+
+    server = Server("privacy-gateway-proxy", version="0.2.0")
+
+    @server.list_tools()
+    async def list_tools():
+        tools = []
+        for name, backend in proxy.config.backends.items():
+            for tool in backend.tools:
+                schema = _public_schema(name, tool)
+                schema["properties"]["document_id"]["enum"] = [d.ident for d in proxy.config.documents.values() if d.backend == name]
+                if "sheet" in schema["properties"]:
+                    aliases = sorted({alias for d in proxy.config.documents.values() if d.backend == name for alias in d.sheets})
+                    schema["properties"]["sheet"]["enum"] = aliases
+                kind = PROFILES[name][tool][0]
+                tools.append(types.Tool(name=f"{name}__{tool}", description=f"{kind.title()} registered {name} document content through the privacy gateway.", inputSchema=schema))
+        return tools
+
+    # Upstream sessions and source copy/write operations are shared across HTTP
+    # requests. Serialize calls to protect shared backend operations.
+    call_lock = asyncio.Lock()
+
+    @server.call_tool(validate_input=False)
+    async def call_tool(name: str, arguments: dict | None):
+        async with call_lock:
+            try:
+                result = await proxy.call(name, arguments or {})
+                return types.CallToolResult(content=[types.TextContent(type="text", text=x["text"]) for x in result["content"]],
+                                            structuredContent={"sha256": result["sha256"], "data": result["structuredContent"]})
+            except Exception:
+                return types.CallToolResult(content=[types.TextContent(type="text", text=DENIED)], isError=True)
+
+    return server
+
+
+@asynccontextmanager
+async def proxy_backends(proxy: PrivacyProxy):
+    """Start validated local backend sessions for the lifetime of the server."""
+    from contextlib import AsyncExitStack
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
 
     async with AsyncExitStack() as stack:
         for name, backend in proxy.config.backends.items():
@@ -678,30 +717,7 @@ async def serve_proxy(proxy: PrivacyProxy) -> None:
                     raise RuntimeError("Configured upstream schema incompatible")
             proxy.sessions[name] = session
 
-        server = Server("privacy-gateway-proxy", version="0.2.0")
-
-        @server.list_tools()
-        async def list_tools():
-            tools = []
-            for name, backend in proxy.config.backends.items():
-                for tool in backend.tools:
-                    schema = _public_schema(name, tool)
-                    schema["properties"]["document_id"]["enum"] = [d.ident for d in proxy.config.documents.values() if d.backend == name]
-                    if "sheet" in schema["properties"]:
-                        aliases = sorted({alias for d in proxy.config.documents.values() if d.backend == name for alias in d.sheets})
-                        schema["properties"]["sheet"]["enum"] = aliases
-                    kind = PROFILES[name][tool][0]
-                    tools.append(types.Tool(name=f"{name}__{tool}", description=f"{kind.title()} registered {name} document content through the privacy gateway.", inputSchema=schema))
-            return tools
-
-        @server.call_tool(validate_input=False)
-        async def call_tool(name: str, arguments: dict | None):
-            try:
-                result = await proxy.call(name, arguments or {})
-                return types.CallToolResult(content=[types.TextContent(type="text", text=x["text"]) for x in result["content"]],
-                                            structuredContent={"sha256": result["sha256"], "data": result["structuredContent"]})
-            except Exception:
-                return types.CallToolResult(content=[types.TextContent(type="text", text=DENIED)], isError=True)
-
-        async with stdio_server() as streams:
-            await server.run(*streams, server.create_initialization_options())
+        try:
+            yield
+        finally:
+            proxy.sessions.clear()

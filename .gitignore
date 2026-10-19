@@ -8,3 +8,7 @@ __pycache__/
 config.json
 config.proxy.json
 workspace/
+.env
+config.container.json
+config.proxy.container.json
+sources/

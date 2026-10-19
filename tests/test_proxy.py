@@ -167,7 +167,7 @@ class ProxyTests(unittest.TestCase):
         from privacy_gateway.proxy import _upstream_compatible
 
         async def flow():
-            params = StdioServerParameters(command=str(Path(sys.executable).resolve()), args=[str(Path(__file__).with_name("fixture_mcp_server.py"))])
+            params = StdioServerParameters(command=str(Path(sys.executable).absolute()), args=[str(Path(__file__).with_name("fixture_mcp_server.py"))])
             async with stdio_client(params) as streams:
                 async with ClientSession(*streams) as session:
                     await session.initialize()
