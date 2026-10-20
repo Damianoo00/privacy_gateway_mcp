@@ -1,9 +1,15 @@
 {
-  "source_roots": ["/absolute/path/to/approved-documents"],
   "workspace": "/absolute/path/to/private-gateway-workspace",
   "language": "en",
   "spacy_model": "en_core_web_lg",
-  "entities": ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IBAN_CODE", "LOCATION"],
+  "entities": [
+    "PERSON",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "LOCATION"
+  ],
   "score_threshold": 0.35,
   "access_scope": "local-user",
   "max_source_bytes": 10485760,
@@ -12,29 +18,42 @@
   "backends": {
     "docx": {
       "command": "/usr/bin/node",
-      "args": ["/opt/approved/docx-mcp-server/dist/index.js"],
-      "tools": ["read_document", "edit_paragraphs"]
+      "args": [
+        "/opt/approved/docx-mcp-server/dist/index.js"
+      ],
+      "tools": [
+        "read_document",
+        "edit_paragraphs"
+      ]
     },
     "excel": {
       "command": "/opt/approved/excel-mcp-server/excel-mcp-server",
       "args": [],
-      "tools": ["excel_describe_sheets", "excel_read_sheet", "excel_write_to_sheet"]
+      "tools": [
+        "excel_describe_sheets",
+        "excel_read_sheet",
+        "excel_write_to_sheet"
+      ]
     },
     "pptx": {
       "command": "/opt/approved/pptx-mcp-server/.venv/bin/pptx-mcp-server",
       "args": [],
-      "tools": ["pptx_get_info", "pptx_read_slide", "pptx_edit_text"]
+      "tools": [
+        "pptx_get_info",
+        "pptx_read_slide",
+        "pptx_edit_text"
+      ]
     },
     "filesystem": {
       "command": "/usr/bin/node",
-      "args": ["/opt/approved/server-filesystem/dist/index.js", "/absolute/path/to/private-gateway-workspace"],
-      "tools": ["read_text_file", "edit_file"]
+      "args": [
+        "/opt/approved/server-filesystem/dist/index.js",
+        "/absolute/path/to/private-gateway-workspace"
+      ],
+      "tools": [
+        "read_text_file",
+        "edit_file"
+      ]
     }
-  },
-  "documents": [
-    {"id": "doc_public_word_001", "path": "/absolute/path/to/approved-documents/report.docx", "backend": "docx"},
-    {"id": "doc_public_excel_001", "path": "/absolute/path/to/approved-documents/book.xlsx", "backend": "excel", "sheets": {"sheet1": "Confidential Sheet"}},
-    {"id": "doc_public_slides_001", "path": "/absolute/path/to/approved-documents/deck.pptx", "backend": "pptx"},
-    {"id": "doc_public_text_001", "path": "/absolute/path/to/approved-documents/note.txt", "backend": "filesystem"}
-  ]
+  }
 }

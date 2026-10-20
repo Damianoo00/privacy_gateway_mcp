@@ -1,7 +1,6 @@
 """External MCP config and profile routing regression tests."""
 import asyncio
 from contextlib import AsyncExitStack, suppress
-import json
 import os
 import sys
 import socket
@@ -49,16 +48,16 @@ class ExternalConfigTests(unittest.TestCase):
         proxy.sessions["my_files"] = Session()
 
         async def flow():
-            result = await proxy.call("my_files__read_text_file", {"document_id": "doc_first_12345678"})
+            result = await proxy.call("my_files__read_text_file", {"path": str(self.document)})
             self.assertNotIn("Alice", str(result))
             self.assertNotIn("/remote/shared", str(result))
             self.assertEqual(seen[0][0], "read_text_file")
             self.assertTrue(seen[0][1]["path"].startswith("/remote/shared/proxy-"))
             self.assertEqual(proxy.public_tools(), ["my_files__read_text_file"])
             with self.assertRaises(Exception):
-                await proxy.call("my_files__edit_file", {"document_id": "doc_first_12345678"})
+                await proxy.call("my_files__edit_file", {"path": str(self.document)})
             with self.assertRaises(Exception):
-                await proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678"})
+                await proxy.call("filesystem__read_text_file", {"path": str(self.document)})
 
         asyncio.run(flow())
 

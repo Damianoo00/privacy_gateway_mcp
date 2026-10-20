@@ -33,7 +33,7 @@ Najwygodniej wykonać instalację z przygotowanym
 3. Ustaw `PG_SOURCES` na zatwierdzony katalog źródeł i `PG_WORKSPACE` na osobny,
    prywatny katalog roboczy hosta. UID 1000 musi móc w nim czytać i pisać. Backendy
    muszą widzieć te same kopie robocze; samo podanie adresu URL nie współdzieli plików.
-4. Dodaj wpisy `mcp_servers`, `documents` i aliasy arkuszy. Przykład:
+4. Dodaj wpisy `mcp_servers`. Przykład:
 
 ```toml
 [mcp_servers.files]
@@ -43,13 +43,11 @@ bearer_token_env = "FILES_BACKEND_TOKEN"
 workspace_path = "/home/operator/private-proxy-workspace"
 enabled_tools = ["read_text_file", "edit_file"]
 
-[[documents]]
-id = "doc_text_12345678"
-path = "/sources/note.txt"
-backend = "files"
 ```
 
-Usuń początkowe `documents = []` przed dopisaniem tabel `[[documents]]`.
+Wywołuj `files__read_text_file` z `path: "/sources/note.txt"`; rejestracja nie jest
+potrzebna. Dodatkowe katalogi hosta muszą być zamontowane w kontenerze, aby proxy
+mogło je odczytać.
 Sekrety przekaż przez prywatny plik środowiska i `PG_BACKEND_ENV_FILE`; domyślnie
 Compose używa pustego `backend-secrets.example.env`. Nie wpisuj wartości tokenów
 do repozytorium. Narzędzia w Codexie będą miały nazwy np. `files__read_text_file`.

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib.util
-from importlib.metadata import PackageNotFoundError, version as metadata_version
 
 
 class GatewayError(Exception):
@@ -28,11 +27,6 @@ class PresidioDetector:
                 for entity, regex in patterns.items():
                     self.engine.registry.add_recognizer(PatternRecognizer(supported_entity=entity,
                         patterns=[Pattern(name=entity, regex=regex, score=0.5)], supported_language="pl"))
-            try:
-                package_version = metadata_version("presidio-analyzer")
-            except PackageNotFoundError:
-                package_version = "unknown"
-            self.identity = "presidio/" + package_version + "/" + language + "/" + spacy_model + "/" + metadata_version("spacy") + "/" + metadata_version(spacy_model.replace("_", "-"))
         except Exception as exc:
             raise RuntimeError("Presidio NLP model unavailable") from exc
 

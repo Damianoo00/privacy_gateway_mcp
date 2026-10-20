@@ -70,7 +70,6 @@ interface/firewall as described in deployment.md. Bridge health is not sanitizat
 The proxy container configuration, independent of `backends.toml`:
 
 ```toml
-source_roots = ["/sources"]
 workspace = "/workspace"
 language = "en"
 spacy_model = "en_core_web_lg"
@@ -88,10 +87,6 @@ bearer_token_env = "FILES_BACKEND_TOKEN"
 workspace_path = "/home/operator/private-proxy-workspace"
 enabled_tools = ["read_text_file", "edit_file"]
 
-[[documents]]
-id = "doc_text_12345678"
-path = "/sources/note.txt"
-backend = "files"
 ```
 
 For native proxy+backend stdio on the same machine use `command/args` directly in
@@ -107,8 +102,11 @@ upstream schemas. Registration alone does not enable unsupported tools.
 Profiles/tools: DOCX read_document/edit_paragraphs; Excel excel_describe_sheets,
 excel_read_sheet/excel_write_to_sheet; PPTX pptx_get_info/pptx_read_slide/pptx_edit_text;
 filesystem read_text_file/edit_file. DOCX edits use a fixed untracked policy for
-repeatable writes. XLSX documents need a `sheets` mapping of public aliases to real
-sheet names. Public commands take document_id; local paths are injected by the proxy.
+repeatable writes. Public commands take an absolute `path`; no document registration is needed.
+XLSX sheet names are returned as privacy tokens by excel_describe_sheets; pass
+the selected token as `sheet`. Legacy documents/auto_documents/source_roots fields
+are ignored. Files must be visible to the proxy process (mount host directories
+when running in Docker).
 
 Before Codex migration validate synthetic PII masking, token restoration on edit,
 SHA conflict rejection, invalid document rejection, and restart persistence. Test

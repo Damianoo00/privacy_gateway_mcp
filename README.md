@@ -61,7 +61,13 @@ Dodanie konfiguracji wymaga restartu proxy.
 
 ## Schemat ochrony dokumentów
 
-Operator rejestruje pliki w `documents`; klient podaje tylko `document_id`.
+Klient podaje bezpośrednio bezwzględną ścieżkę `path`, np.
+`files__read_text_file({"path": "/sources/note.txt"})`. Nie ma rejestracji
+dokumentów ani kroku `resolve_document`. Dostępne są pliki widoczne dla procesu
+proxy z uwzględnieniem uprawnień systemowych i mountów kontenera. Prywatny workspace,
+symlinki, hardlinki i pliki przekraczające limit rozmiaru są odrzucane.
+Stare pola `documents`, `auto_documents` i `source_roots` są ignorowane;
+nie ograniczają dostępu. Nowe pliki nie wymagają restartu.
 Wyniki tekstowe i zagnieżdżony JSON przechodzą przez Presidio oraz reguły lokalne.
 PII zastępują odwracalne tokeny `[[PG:…]]` zapisane w szyfrowanym rejestrze. Token
 można odtworzyć przy edycji tylko dla dokumentu, dla którego go wcześniej wydano.
@@ -70,8 +76,8 @@ Klucz pozostaje w prywatnym wolumenie; utrata klucza uniemożliwia odczyt rejest
 Edycja wymaga `expected_sha256` z ostatniego odczytu. Backend pracuje na prywatnej
 kopii, a proxy sprawdza źródło przed atomowym zastąpieniem. Błąd lub timeout nie
 uprawnia do automatycznego ponowienia zapisu. Po zapisie ponownie odczytaj dokument.
-DOCX korzysta z edycji bez nowych śledzonych rewizji. Excel wymaga publicznych
-aliasów arkuszy; formuły nie są dopuszczone. Obrazy, audio, zasoby binarne, sampling
+DOCX korzysta z edycji bez nowych śledzonych rewizji. Excel zwraca nazwy arkuszy jako tokeny z `excel_describe_sheets`;
+przekaż wybrany token w `sheet`. Formuły nie są dopuszczone. Obrazy, audio, zasoby binarne, sampling
 oraz niezatwierdzone narzędzia nie są wystawiane. PDF i OCR nie są obsługiwane.
 
 Oryginały na dysku nadal mogą zawierać dane wrażliwe. Detekcja nie daje gwarancji

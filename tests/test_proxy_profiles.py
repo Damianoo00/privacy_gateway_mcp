@@ -91,16 +91,15 @@ class ProfileTests(unittest.TestCase):
             tokens = []
             for backend, read, write, selectors in (
                 ("docx", "read_document", "edit_paragraphs", {}),
-                ("excel", "excel_read_sheet", "excel_write_to_sheet", {"sheet": "sheet1", "range": "A1"}),
+                ("excel", "excel_read_sheet", "excel_write_to_sheet", {"sheet": "People", "range": "A1"}),
                 ("pptx", "pptx_read_slide", "pptx_edit_text", {"slide_index": 0}),
             ):
-                document_id = "doc_contract_" + backend
-                first = await self.proxy.call(backend + "__" + read, {"document_id": document_id, **selectors})
+                first = await self.proxy.call(backend + "__" + read, {"path": str(self.paths[backend]), **selectors})
                 text = first["content"][0]["text"]
                 token = TOKEN.search(text).group()
                 self.assertNotIn("Alice", text)
                 tokens.append(token)
-                arguments = {"document_id": document_id, "expected_sha256": first["sha256"], **selectors}
+                arguments = {"path": str(self.paths[backend]), "expected_sha256": first["sha256"], **selectors}
                 if backend == "docx":
                     arguments["edits"] = [{"paragraph_index": 0, "new_text": token + " updated"}]
                 elif backend == "excel":
@@ -116,7 +115,7 @@ class ProfileTests(unittest.TestCase):
                     self.assertIs(upstream["track_changes"], False)
                     self.assertIs(upstream["allow_untracked_edit"], True)
                     second = await self.proxy.call("docx__edit_paragraphs", {
-                        "document_id": document_id, "expected_sha256": changed["sha256"],
+                        "path": str(self.paths[backend]), "expected_sha256": changed["sha256"],
                         "edits": [{"paragraph_index": 0, "new_text": token + " twice"}],
                     })
                     self.assertEqual(self.paths[backend].read_text(), "Alice twice")
@@ -125,6 +124,22 @@ class ProfileTests(unittest.TestCase):
         asyncio.run(flow())
         for backend, _, arguments in calls:
             self.assertNotEqual(str(self.paths[backend]), arguments.get("file_path", arguments.get("fileAbsolutePath")))
+
+    def test_excel_sheet_tokens_hide_names_and_restore_after_restart(self):
+        from privacy_gateway.core import GatewayError
+        doc = self.proxy.config.document(str(self.paths["excel"]), "excel")
+        result = self.proxy._result(doc, response(json.dumps({"sheets": [{"name": "Alice People"}]}),
+                                     {"sheets": [{"name": "Alice People"}]}), "/tmp/private.xlsx", "excel_describe_sheets")
+        token = json.loads(result["content"][0]["text"])["sheets"][0]["name"]
+        self.assertNotIn("Alice", str(result))
+        self.assertNotIn("People", str(result))
+        self.assertEqual(result["structuredContent"]["sheets"][0]["name"], token)
+        restarted = PrivacyProxy(self.proxy.config, bytes(range(32)), PersonDetector())
+        _, upstream = restarted._validate(doc, "excel_read_sheet", {"path": str(doc.path), "sheet": token})
+        self.assertEqual(upstream["sheetName"], "Alice People")
+        other = self.proxy.config.document(str(doc.path.parent / "other.xlsx"), "excel")
+        with self.assertRaises(GatewayError):
+            restarted._validate(other, "excel_read_sheet", {"path": str(other.path), "sheet": token})
 
     def test_excel_schema_compatibility_is_per_tool(self):
         def schema(fields, required):

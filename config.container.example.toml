@@ -1,5 +1,4 @@
-# Starts with no backends or documents. Configure external MCP servers after deployment.
-source_roots = ["/sources"]
+# Configure external MCP servers after deployment; documents need no registration.
 workspace = "/workspace"
 language = "en"
 spacy_model = "en_core_web_lg"
@@ -9,7 +8,6 @@ access_scope = "local-user"
 max_source_bytes = 10485760
 max_output_chars = 1000000
 timeout_seconds = 30
-documents = []
 
 [mcp_servers]
 
@@ -20,9 +18,4 @@ documents = []
 # enabled_tools = ["read_text_file", "edit_file"]
 # bearer_token_env = "FILES_BACKEND_TOKEN"
 # workspace_path = "/home/user/private-proxy-workspace"
-#
-# [[documents]]
-# id = "doc_text_12345678"
-# path = "/sources/note.txt"
-# backend = "files"
-# Remove documents = [] above before adding [[documents]].
+# Pass path = "/sources/note.txt" directly to files__read_text_file.

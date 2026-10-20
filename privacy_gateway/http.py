@@ -12,7 +12,6 @@ def create_http_app(server, *, bearer_token: str | None = None, allowed_hosts: l
     from starlette.applications import Starlette
     from starlette.responses import PlainTextResponse
     from starlette.routing import Route
-    import uvicorn
 
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

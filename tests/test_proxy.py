@@ -51,6 +51,36 @@ class ProxyTests(unittest.TestCase):
         }
         self.proxy = PrivacyProxy(ProxyConfig(self.config), bytes(range(32)), Detector())
 
+    def test_unregistered_paths_anywhere_are_masked(self):
+        self.config.pop("documents")
+        self.config.pop("source_roots")
+        config = ProxyConfig(self.config)
+        proxy = PrivacyProxy(config, bytes(range(32)), Detector())
+        proxy.sessions["filesystem"] = Session(lambda name, args: reply(Path(args["path"]).read_text()))
+        for path in (self.source / "new.txt", self.source.parent / "outside.custom"):
+            path.write_text("Alice")
+            result = asyncio.run(proxy.call("filesystem__read_text_file", {"path": str(path)}))
+            self.assertNotIn("Alice", json.dumps(result))
+            self.assertIn("[[PG:PERSON:", json.dumps(result))
+        self.assertFalse(hasattr(config, "documents"))
+
+    def test_unsafe_paths_denied(self):
+        outside = self.source.parent / "outside.txt"
+        outside.write_text("fixture")
+        link = self.source / "link.txt"
+        link.symlink_to(outside)
+        hard = self.source / "hard.txt"
+        hard.hardlink_to(outside)
+        large = self.source / "large.txt"
+        large.write_bytes(b"x" * 100001)
+        internal = self.workspace / "internal.txt"
+        internal.write_text("fixture")
+        self.proxy.sessions["filesystem"] = Session(lambda name, args: reply("fixture"))
+        for path in [link, hard, self.source / "missing.txt", large,
+                     self.source / ".." / "outside.txt", self.source, internal, Path("relative.txt")]:
+            with self.subTest(path=path), self.assertRaises(GatewayError):
+                asyncio.run(self.proxy.call("filesystem__read_text_file", {"path": str(path)}))
+
     def test_read_edit_reread_and_vault(self):
         def call(name, args):
             path = Path(args["path"])
@@ -62,23 +92,23 @@ class ProxyTests(unittest.TestCase):
         session = Session(call)
         self.proxy.sessions["filesystem"] = session
         async def flow():
-            first = await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678"})
+            first = await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc)})
             token = first["content"][0]["text"]
             self.assertEqual(json.loads(first["content"][-1]["text"])["sha256"], first["sha256"])
             self.assertNotIn("Alice", str(first))
             self.assertTrue(token.startswith("[[PG:PERSON:"))
             self.assertNotIn(b"Alice", (self.workspace / "proxy_vault.sqlite3").read_bytes())
-            edited = await self.proxy.call("filesystem__edit_file", {"document_id": "doc_first_12345678", "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": token + " has arrived"}]})
+            edited = await self.proxy.call("filesystem__edit_file", {"path": str(self.doc), "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": token + " has arrived"}]})
             self.assertEqual(self.doc.read_text(), "Alice has arrived")
             self.assertNotEqual(edited["sha256"], first["sha256"])
             with self.assertRaises(GatewayError):
-                await self.proxy.call("filesystem__edit_file", {"document_id": "doc_first_12345678", "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": "X"}]})
-            second = await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678"})
+                await self.proxy.call("filesystem__edit_file", {"path": str(self.doc), "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": "X"}]})
+            second = await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc)})
             self.assertIn(token, second["content"][0]["text"])
         asyncio.run(flow())
 
     def test_forged_and_cross_document_tokens_denied(self):
-        token = self.proxy.vault.issue("doc_first_12345678", "PERSON", "Alice")
+        token = self.proxy.vault.issue(self.proxy.config.document(str(self.doc), "filesystem").ident, "PERSON", "Alice")
         second = self.source / "another.txt"
         second.write_text("Bob")
         self.config["documents"].append({"id": "doc_second_12345678", "path": str(second), "backend": "filesystem"})
@@ -86,7 +116,7 @@ class ProxyTests(unittest.TestCase):
         async def flow():
             for bad in (token, "[[PG:PERSON:" + "0" * 32 + "]]"):
                 with self.assertRaises(GatewayError):
-                    await proxy.call("filesystem__edit_file", {"document_id": "doc_second_12345678", "expected_sha256": hashlib.sha256(b"Bob").hexdigest(), "edits": [{"oldText": "Bob", "newText": bad}]})
+                    await proxy.call("filesystem__edit_file", {"path": str(second), "expected_sha256": hashlib.sha256(b"Bob").hexdigest(), "edits": [{"oldText": "Bob", "newText": bad}]})
         asyncio.run(flow())
 
     def test_vault_row_swap_is_rejected(self):
@@ -99,54 +129,33 @@ class ProxyTests(unittest.TestCase):
         with self.assertRaises(GatewayError):
             vault.restore("doc_first_12345678", first)
 
-    def test_duplicate_file_aliases_denied(self):
-        self.config["documents"].append({"id": "doc_second_12345678", "path": str(self.doc), "backend": "filesystem"})
-        with self.assertRaises(ValueError):
-            ProxyConfig(self.config)
-        self.config["documents"][-1]["path"] = str(self.source / "hardlink.txt")
-        Path(self.config["documents"][-1]["path"]).hardlink_to(self.doc)
-        with self.assertRaises(ValueError):
-            ProxyConfig(self.config)
-
     def test_excel_html_metadata_and_json_escape(self):
-        excel = Document("doc_excel_12345678", self.doc, "excel", {"sheet1": "A"})
+        excel = Document("doc_excel_12345678", self.doc, "excel")
         source = '<h2>Read Sheet</h2>\n<table><tr><td>A1</td><td>Alice</td></tr></table>\n<li>sheet name: A</li>\n'
         safe = self.proxy._result(excel, reply(source), "/tmp/copy.xlsx", "excel_read_sheet")
         text = safe["content"][0]["text"]
         self.assertIn("<td>A1</td>", text)
-        self.assertIn("sheet name: sheet1", text)
+        self.assertIn("sheet name: [[PG:SHEET:", text)
         self.assertNotIn("Alice", text)
         nested = '<h2>Read Sheet</h2>\n<table><tr><td>A&amp;#108;ice</td></tr></table>\n<li>sheet name: A</li>\n'
         nested_safe = self.proxy._result(excel, reply(nested), "/tmp/copy.xlsx", "excel_read_sheet")
         self.assertNotIn("Alice", nested_safe["content"][0]["text"])
         self.assertNotIn("&#108;", nested_safe["content"][0]["text"])
-        pptx = Document("doc_pptx_12345678", self.doc, "pptx", {})
+        pptx = Document("doc_pptx_12345678", self.doc, "pptx")
         escaped = '{"ok":true,"result":{"message":"\\u0041lice"}}'
         safe = self.proxy._result(pptx, reply(escaped), "/tmp/copy.pptx", "pptx_read_slide")
         self.assertNotIn("Alice", safe["content"][0]["text"])
-
-    def test_path_escape_and_symlink_denied(self):
-        outside = Path(self.tmp.name) / "outside.txt"
-        outside.write_text("secret")
-        self.config["documents"][0]["path"] = str(self.source / ".." / "outside.txt")
-        with self.assertRaises(ValueError):
-            ProxyConfig(self.config)
-        link = self.source / "link.txt"
-        link.symlink_to(outside)
-        self.config["documents"][0]["path"] = str(link)
-        with self.assertRaises(GatewayError):
-            ProxyConfig(self.config)
 
     def test_unapproved_arguments_and_content_types_denied(self):
         self.proxy.sessions["filesystem"] = Session(lambda n, a: reply("Alice"))
         async def flow():
             with self.assertRaises(GatewayError):
-                await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678", "path": str(self.doc)})
+                await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc), "document_id": "obsolete"})
             with self.assertRaises(GatewayError):
-                await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678", "head": 1, "tail": 1})
+                await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc), "head": 1, "tail": 1})
             self.proxy.sessions["filesystem"] = Session(lambda n, a: SimpleNamespace(isError=False, content=[SimpleNamespace(type="image", data="secret")], structuredContent=None, meta=None))
             with self.assertRaises(GatewayError):
-                await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678"})
+                await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc)})
         asyncio.run(flow())
 
     def test_failed_write_does_not_commit(self):
@@ -156,7 +165,7 @@ class ProxyTests(unittest.TestCase):
         self.proxy.sessions["filesystem"] = Session(call)
         async def flow():
             with self.assertRaises(GatewayError):
-                await self.proxy.call("filesystem__edit_file", {"document_id": "doc_first_12345678", "expected_sha256": hashlib.sha256(b"Alice").hexdigest(), "edits": [{"oldText": "Alice", "newText": "Changed"}]})
+                await self.proxy.call("filesystem__edit_file", {"path": str(self.doc), "expected_sha256": hashlib.sha256(b"Alice").hexdigest(), "edits": [{"oldText": "Alice", "newText": "Changed"}]})
         asyncio.run(flow())
         self.assertEqual(self.doc.read_text(), "Alice")
 
@@ -175,10 +184,10 @@ class ProxyTests(unittest.TestCase):
                     self.assertTrue(_upstream_compatible("filesystem", "read_text_file", schemas["read_text_file"]))
                     self.assertTrue(_upstream_compatible("filesystem", "edit_file", schemas["edit_file"]))
                     self.proxy.sessions["filesystem"] = session
-                    first = await self.proxy.call("filesystem__read_text_file", {"document_id": "doc_first_12345678"})
+                    first = await self.proxy.call("filesystem__read_text_file", {"path": str(self.doc)})
                     token = first["content"][0]["text"]
                     self.assertNotIn("Alice", token)
-                    edited = await self.proxy.call("filesystem__edit_file", {"document_id": "doc_first_12345678", "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": token + " updated"}]})
+                    edited = await self.proxy.call("filesystem__edit_file", {"path": str(self.doc), "expected_sha256": first["sha256"], "edits": [{"oldText": token, "newText": token + " updated"}]})
                     self.assertEqual(self.doc.read_text(), "Alice updated")
                     self.assertNotEqual(first["sha256"], edited["sha256"])
         asyncio.run(flow())

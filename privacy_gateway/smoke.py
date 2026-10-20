@@ -1,4 +1,4 @@
-"""Check the public MCP endpoint without reading or editing registered files."""
+"""Check the public MCP endpoint without reading or editing user files."""
 import argparse
 import asyncio
 import sys

@@ -1,4 +1,4 @@
-"""Allowlisted, local MCP proxy for registered office documents."""
+"""Local MCP privacy proxy with direct document paths."""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +31,6 @@ URL = re.compile(r"(?i)\b(?:https?://|file://|data:|www\.)[^\s<>\"']+")
 ABS_PATH = re.compile(r"(?<![\w])/(?:[^\s<>\"']+/)+[^\s<>\"']+")
 CELL_RANGE = re.compile(r"^[A-Z]{1,3}[1-9][0-9]{0,6}(?::[A-Z]{1,3}[1-9][0-9]{0,6})?$")
 ANCHOR = re.compile(r"^[A-Fa-f0-9]{8}$")
-DOC_ID = re.compile(r"^doc_[A-Za-z0-9_-]{8,64}$")
 
 # The names and argument keys are those of the upstream projects, not a generic MCP passthrough.
 PROFILES = {
@@ -61,7 +60,7 @@ REQUIRED = {
     "pptx": {"pptx_read_slide": {"slide_index"}, "pptx_edit_text": {"slide_index", "shape_index", "text"}},
     "filesystem": {"edit_file": {"edits"}},
 }
-SUFFIXES = {"docx": {".docx"}, "excel": {".xlsx"}, "pptx": {".pptx"}, "filesystem": {".txt", ".md", ".csv", ".html"}}
+SUFFIXES = {"docx": {".docx"}, "excel": {".xlsx"}, "pptx": {".pptx"}}
 
 
 def _deny() -> GatewayError:
@@ -162,20 +161,18 @@ class Document:
     ident: str
     path: Path
     backend: str
-    sheets: dict[str, str]
 
 
 class ProxyConfig:
     def __init__(self, raw: dict):
-        _object(raw, {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "mcp_servers", "documents"},
-                {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars"})
+        _object(raw, {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "mcp_servers", "documents", "auto_documents"},
+                {"workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars"})
         if "backends" in raw and "mcp_servers" in raw:
             raise ValueError("Specify one MCP server map")
-        self.roots = tuple(Path(p) for p in raw["source_roots"])
-        if not self.roots or any(not p.is_absolute() or ".." in p.parts or not p.is_dir() or p.is_symlink() for p in self.roots):
-            raise ValueError("Invalid source roots")
+        # Legacy source_roots/documents/auto_documents are accepted but no longer
+        # control access. The process filesystem and OS permissions define visibility.
         self.workspace = Path(raw["workspace"])
-        if not self.workspace.is_absolute() or ".." in self.workspace.parts or self.workspace.is_symlink() or any(self.workspace == p or self.workspace.is_relative_to(p) or p.is_relative_to(self.workspace) for p in self.roots):
+        if not self.workspace.is_absolute() or ".." in self.workspace.parts or self.workspace.is_symlink():
             raise ValueError("Invalid workspace")
         self.language = _string(raw["language"], 8)
         self.spacy_model = _string(raw["spacy_model"], 100)
@@ -195,45 +192,19 @@ class ProxyConfig:
         if not isinstance(servers, dict):
             raise ValueError("Invalid MCP server map")
         self.backends = {name: parse_backend(name, item, legacy="backends" in raw) for name, item in servers.items()}
-        self.documents = {}
-        seen_paths = set()
-        seen_files = set()
-        for item in raw.get("documents", []):
-            _object(item, {"id", "path", "backend", "sheets"}, {"id", "path", "backend"})
-            ident, path, backend = item["id"], Path(item["path"]), item["backend"]
-            if not isinstance(ident, str) or not DOC_ID.fullmatch(ident) or ident in self.documents or backend not in self.backends or not path.is_absolute() or ".." in path.parts or path.suffix.lower() not in SUFFIXES[self.backends[backend].profile]:
-                raise ValueError("Invalid document registration")
-            sheets = item.get("sheets", {})
-            if not isinstance(sheets, dict) or any(not re.fullmatch("[A-Za-z0-9_-]{1,64}", k) or not isinstance(v, str) or not v or len(v) > 31 for k, v in sheets.items()) or len(set(sheets.values())) != len(sheets):
-                raise ValueError("Invalid sheet aliases")
-            if self.backends[backend].profile == "excel" and not sheets:
-                raise ValueError("Excel documents need explicit sheet aliases")
-            if path in seen_paths:
-                raise ValueError("Duplicate document path")
-            seen_paths.add(path)
-            self.documents[ident] = Document(ident, path, backend, sheets)
         self.workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.workspace.resolve() != self.workspace or any(root.resolve() != root for root in self.roots):
-            raise ValueError("Symlink in configured directory")
-        if any(self.workspace == root or self.workspace.is_relative_to(root) or root.is_relative_to(self.workspace) for root in self.roots):
-            raise ValueError("Workspace overlaps a source root")
+        if self.workspace.resolve() != self.workspace:
+            raise ValueError("Symlink in configured workspace")
         os.chmod(self.workspace, 0o700)
-        for doc in self.documents.values():
-            self.source(doc)  # startup path and size preflight
-            identity = (doc.path.stat().st_dev, doc.path.stat().st_ino)
-            if identity in seen_files:
-                raise ValueError("Duplicate document file")
-            seen_files.add(identity)
 
     @classmethod
     def load(cls, path: str) -> "ProxyConfig":
         return cls(load_config_file(path))
 
-
     def source(self, doc: Document) -> bytes:
         """Open every path component without following a link, then read a regular file."""
         try:
-            if not any(doc.path.is_relative_to(root) for root in self.roots):
+            if doc.path.is_relative_to(self.workspace):
                 raise _deny()
             parts = doc.path.parts[1:]
             fds = [os.open("/", os.O_RDONLY | os.O_DIRECTORY)]
@@ -243,7 +214,7 @@ class ProxyConfig:
                 fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1])
                 fds.append(fd)
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_size > self.max_source:
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > self.max_source:
                     raise _deny()
                 with os.fdopen(os.dup(fd), "rb") as stream:
                     data = stream.read(self.max_source + 1)
@@ -255,6 +226,18 @@ class ProxyConfig:
                     os.close(fd)
         except Exception as exc:
             raise _deny() from exc
+
+    def document(self, path: str, backend: str) -> Document:
+        """Build a stable, private identity without registration or a path catalog."""
+        path = _string(path, 4096)
+        candidate = Path(path)
+        if not path or not candidate.is_absolute() or ".." in candidate.parts or backend not in self.backends:
+            raise _deny()
+        profile = self.backends[backend].profile
+        if profile != "filesystem" and candidate.suffix.lower() not in SUFFIXES[profile]:
+            raise _deny()
+        ident = "doc_" + hashlib.sha256(str(candidate).encode()).hexdigest()[:48]
+        return Document(ident, candidate, backend)
 
 
 def load_config_file(path: str) -> dict:
@@ -320,12 +303,12 @@ class PrivacyProxy:
         self.config = config
         self.detector = detector if detector is not None else PresidioDetector(config.language, config.spacy_model)
         if detector is None:
-            supported = set(self.detector.engine.registry.get_supported_entities(language=config.language))
+            supported = set(self.detector.engine.get_supported_entities(language=config.language))
             if not set(config.entities) <= supported:
                 raise RuntimeError("Configured detection entity unavailable")
         self.vault = Vault(config.workspace, key, config.scope)
         self.sessions: dict[str, Any] = {}
-        self.locks = {ident: asyncio.Lock() for ident in config.documents}
+        self.locks: dict[str, asyncio.Lock] = {}
         self.backend_locks = {name: asyncio.Lock() for name in config.backends}
         self.failed_backends: set[str] = set()
 
@@ -342,8 +325,8 @@ class PrivacyProxy:
     def _validate(self, doc: Document, tool: str, arguments: dict) -> tuple[str, dict]:
         profile = self.config.backends[doc.backend].profile
         kind, fields = PROFILES[profile][tool]
-        _object(arguments, set(fields) | {"document_id", "expected_sha256"}, {"document_id"} | REQUIRED.get(profile, {}).get(tool, set()) | ({"expected_sha256"} if kind == "write" else set()))
-        if arguments["document_id"] != doc.ident:
+        _object(arguments, set(fields) | {"path", "expected_sha256"}, {"path"} | REQUIRED.get(profile, {}).get(tool, set()) | ({"expected_sha256"} if kind == "write" else set()))
+        if arguments["path"] != str(doc.path):
             raise _deny()
         if kind == "write" and (not isinstance(arguments["expected_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", arguments["expected_sha256"])):
             raise _deny()
@@ -365,9 +348,9 @@ class PrivacyProxy:
                     raise _deny()
                 out[name] = value
             elif field == "sheet":
-                if value not in doc.sheets:
+                out["sheetName"] = self.vault.restore(doc.ident, _string(value, 1000))
+                if not out["sheetName"] or len(out["sheetName"]) > 31:
                     raise _deny()
-                out["sheetName"] = doc.sheets[value]
             elif field == "text":
                 out[name] = self.vault.restore(doc.ident, _string(value, self.config.max_output))
             elif field == "paragraph_edits":
@@ -421,7 +404,6 @@ class PrivacyProxy:
             out["track_changes"] = False
             out["allow_untracked_edit"] = True
         elif profile == "excel":
-            out["fileAbsolutePath"] = ""  # replaced by transaction path
             if tool == "excel_write_to_sheet":
                 out["newSheet"] = False
             if tool == "excel_read_sheet":
@@ -435,7 +417,8 @@ class PrivacyProxy:
         if len(text) > self.config.max_output:
             raise _deny()
         for secret_path in (str(doc.path), path):
-            text = text.replace(secret_path, doc.ident)
+            if secret_path:
+                text = text.replace(secret_path, doc.ident)
         text = text.replace(doc.path.name, doc.ident)
         text = text.replace("[[PG:", "[[PG_LITERAL:")
         spans = self.detector.detect(text, self.config.language, self.config.entities, self.config.threshold)
@@ -480,30 +463,27 @@ class PrivacyProxy:
             return {self._safe_text(doc, k, path): self._safe_value(doc, v, path, depth + 1) for k, v in value.items()}
         raise _deny()
 
-    def _excel_describe(self, doc: Document, value: Any) -> Any:
+    def _excel_describe(self, doc: Document, value: Any, path: str = "") -> Any:
         if not isinstance(value, dict) or not isinstance(value.get("sheets"), list):
             raise _deny()
-        aliases = {real: alias for alias, real in doc.sheets.items()}
-        result = dict(value)
+        result = self._safe_value(doc, {k: v for k, v in value.items() if k != "sheets"}, path)
         result["sheets"] = []
         for sheet in value["sheets"]:
             if not isinstance(sheet, dict) or not isinstance(sheet.get("name"), str):
                 raise _deny()
-            if sheet["name"] in aliases:
-                result["sheets"].append({**sheet, "name": aliases[sheet["name"]]})
+            name = self.vault.issue(doc.ident, "SHEET", sheet["name"])
+            result["sheets"].append({**self._safe_value(doc, {k: v for k, v in sheet.items() if k != "name"}, path), "name": name})
         return result
 
-    def _excel_html(self, doc: Document, text: str) -> str:
+    def _excel_html(self, doc: Document, text: str, path: str = "") -> str:
         pattern = re.compile(r"(<li>sheet name: )([^<\n]*)(</li>)")
         matches = list(pattern.finditer(text))
         if len(matches) != 1:
             raise _deny()
-        aliases = {real: alias for alias, real in doc.sheets.items()}
         original = html.unescape(matches[0].group(2))
-        if original not in aliases:
-            raise _deny()
+        alias = self.vault.issue(doc.ident, "SHEET", original)
         match = matches[0]
-        return text[:match.start(2)] + aliases[original] + text[match.end(2):]
+        return self._safe_text(doc, text[:match.start(2)], path) + alias + self._safe_text(doc, text[match.end(2):], path)
 
     def _html_decode_bounded(self, text: str) -> str:
         for _ in range(4):
@@ -526,21 +506,17 @@ class PrivacyProxy:
         for item in result.content:
             if item.type != "text" or getattr(item, "_meta", None) or getattr(item, "meta", None):
                 raise _deny()
-            if profile == "pptx":
-                try:
-                    envelope = json.loads(item.text)
-                except (ValueError, TypeError) as exc:
-                    raise _deny() from exc
-                if not isinstance(envelope, dict) or envelope.get("ok") is not True or not isinstance(envelope.get("result"), dict):
-                    raise _deny()
             try:
                 decoded = json.loads(item.text)
             except (ValueError, TypeError):
                 decoded = None
+            if profile == "pptx":
+                if not isinstance(decoded, dict) or decoded.get("ok") is not True or not isinstance(decoded.get("result"), dict):
+                    raise _deny()
             if profile == "excel" and tool == "excel_describe_sheets":
-                safe_text = json.dumps(self._safe_value(doc, self._excel_describe(doc, decoded), path), ensure_ascii=False)
+                safe_text = json.dumps(self._excel_describe(doc, decoded, path), ensure_ascii=False)
             elif profile == "excel" and tool in ("excel_read_sheet", "excel_write_to_sheet"):
-                safe_text = self._safe_text(doc, self._html_decode_bounded(self._excel_html(doc, item.text)), path)
+                safe_text = self._excel_html(doc, self._html_decode_bounded(item.text), path)
             elif isinstance(decoded, (dict, list)):
                 safe_text = json.dumps(self._safe_value(doc, decoded, path), ensure_ascii=False)
             elif isinstance(decoded, str):
@@ -554,8 +530,9 @@ class PrivacyProxy:
         structured = getattr(result, "structuredContent", None)
         if structured is not None:
             if profile == "excel" and tool == "excel_describe_sheets":
-                structured = self._excel_describe(doc, structured)
-            structured = self._safe_value(doc, structured, path)
+                structured = self._excel_describe(doc, structured, path)
+            else:
+                structured = self._safe_value(doc, structured, path)
             if len(json.dumps(structured, ensure_ascii=False)) + total_chars > self.config.max_output:
                 raise _deny()
         if not content and structured is None:
@@ -589,11 +566,11 @@ class PrivacyProxy:
             backend, tool = public_name.split("__", 1)
             if backend not in self.config.backends or tool not in self.config.backends[backend].tools:
                 raise _deny()
-            doc = self.config.documents.get(arguments.get("document_id")) if isinstance(arguments, dict) else None
-            if doc is None or doc.backend != backend:
+            if not isinstance(arguments, dict):
                 raise _deny()
+            doc = self.config.document(arguments.get("path"), backend)
             kind, upstream = self._validate(doc, tool, arguments)
-            async with self.locks[doc.ident]:
+            async with self.locks.setdefault(doc.ident, asyncio.Lock()):
                 async with self._file_lock(doc):
                     original = self.config.source(doc)
                     digest = hashlib.sha256(original).hexdigest()
@@ -637,7 +614,7 @@ class PrivacyProxy:
                             safe["sha256"] = hashlib.sha256(changed).hexdigest()
                         else:
                             safe["sha256"] = digest
-                        safe["content"].append({"type": "text", "text": json.dumps({"document_id": doc.ident, "sha256": safe["sha256"]})})
+                        safe["content"].append({"type": "text", "text": json.dumps({"sha256": safe["sha256"]})})
                         return safe
         except Exception as exc:
             raise _deny() from exc
@@ -668,16 +645,13 @@ class PrivacyProxy:
                 os.close(target)
             staged = ".pg-" + secrets.token_hex(16) + doc.path.suffix
             output = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, info.st_mode & 0o600, dir_fd=fd)
-            try:
-                with os.fdopen(output, "wb") as stream:
-                    stream.write(changed)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(staged, doc.path.name, src_dir_fd=fd, dst_dir_fd=fd)
-                os.fsync(fd)
-                staged = None
-            except Exception:
-                raise
+            with os.fdopen(output, "wb") as stream:
+                stream.write(changed)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(staged, doc.path.name, src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+            staged = None
         finally:
             if staged:
                 try:
@@ -690,7 +664,7 @@ class PrivacyProxy:
 
 def _public_schema(backend: str, tool: str) -> dict:
     kind, fields = PROFILES[backend][tool]
-    properties = {"document_id": {"type": "string", "enum": []}}
+    properties = {"path": {"type": "string", "description": "Absolute path to a document visible to the proxy process; no registration required"}}
     for name, field in fields.items():
         if field in ("index", "positive"):
             properties[name] = {"type": "integer", "minimum": 1 if field == "positive" else 0}
@@ -699,7 +673,7 @@ def _public_schema(backend: str, tool: str) -> dict:
         elif field == "range":
             properties[name] = {"type": "string", "pattern": CELL_RANGE.pattern}
         elif field == "sheet":
-            properties[name] = {"type": "string", "description": "Configured public sheet alias"}
+            properties[name] = {"type": "string", "description": "Sheet name or privacy token returned by excel_describe_sheets"}
         elif field == "text":
             properties[name] = {"type": "string", "description": "Text to write; issued document tokens are restored locally"}
         elif field == "paragraph_edits":
@@ -711,7 +685,7 @@ def _public_schema(backend: str, tool: str) -> dict:
                 "oldText": {"type": "string"}, "newText": {"type": "string"}}, "required": ["oldText", "newText"], "additionalProperties": False}}
         elif field == "values":
             properties[name] = {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": ["string", "number", "boolean", "null"]}}}
-    required = ["document_id", *sorted(REQUIRED.get(backend, {}).get(tool, set()))]
+    required = ["path", *sorted(REQUIRED.get(backend, {}).get(tool, set()))]
     if kind == "write":
         properties["expected_sha256"] = {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 returned by the most recent read of this document; prevents overwriting a changed source"}
         required.append("expected_sha256")
@@ -738,7 +712,12 @@ def proxy_server(proxy: PrivacyProxy):
     from mcp import types
     from mcp.server.lowlevel import Server
 
-    server = Server("privacy-gateway-proxy", version="0.2.0")
+    server = Server("privacy-gateway-proxy", version="0.2.0", instructions=(
+        "Read and edit user documents through this privacy gateway. "
+        "Pass the absolute document path directly; no registration is required. Never bypass the gateway "
+        "with direct filesystem or shell reads if a document is unavailable. "
+        "Preserve privacy tokens and use the latest read's sha256 for edits."
+    ))
 
     @server.list_tools()
     async def list_tools():
@@ -746,12 +725,19 @@ def proxy_server(proxy: PrivacyProxy):
         for name, backend in proxy.config.backends.items():
             for tool in backend.tools:
                 schema = _public_schema(backend.profile, tool)
-                schema["properties"]["document_id"]["enum"] = [d.ident for d in proxy.config.documents.values() if d.backend == name]
-                if "sheet" in schema["properties"]:
-                    aliases = sorted({alias for d in proxy.config.documents.values() if d.backend == name for alias in d.sheets})
-                    schema["properties"]["sheet"]["enum"] = aliases
                 kind = PROFILES[backend.profile][tool][0]
-                tools.append(types.Tool(name=f"{name}__{tool}", description=f"{kind.title()} registered {backend.profile} document content through the privacy gateway.", inputSchema=schema))
+                tools.append(types.Tool(
+                    name=f"{name}__{tool}",
+                    description=(f"{kind.title()} {backend.profile} document content through the privacy gateway. "
+                                 "Detected sensitive data is replaced with privacy tokens. "
+                                 "Pass an absolute path to an existing document; no registration is required. "
+                                 "Writes require expected_sha256 from the latest read; preserve issued tokens."),
+                    inputSchema=schema,
+                    annotations=types.ToolAnnotations(
+                        readOnlyHint=kind == "read", destructiveHint=kind == "write",
+                        idempotentHint=kind == "read", openWorldHint=False,
+                    ),
+                ))
         return tools
 
     # Upstream sessions and source copy/write operations are shared across HTTP

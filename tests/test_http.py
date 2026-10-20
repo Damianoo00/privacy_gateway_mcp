@@ -11,8 +11,6 @@ from unittest.mock import patch
 
 
 class Detector:
-    identity = "http-test"
-
     def detect(self, text, language, entities, threshold):
         return [(i, i + 5, "PERSON") for i in range(len(text)) if text.startswith("Alice", i)]
 
@@ -93,21 +91,30 @@ class HTTPTests(unittest.TestCase):
                         self.assertEqual(response.status_code, 403)
                     async with streamable_http_client(base + "/mcp") as streams:
                         async with ClientSession(streams[0], streams[1]) as session:
-                            await session.initialize()
-                            self.assertEqual(len((await session.list_tools()).tools), 2)
-                            result = await session.call_tool("filesystem__read_text_file", {"document_id": ident})
+                            initialized = await session.initialize()
+                            self.assertIn("Never bypass", initialized.instructions)
+                            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+                            self.assertEqual(len(tools), 2)
+                            read = tools["filesystem__read_text_file"]
+                            write = tools["filesystem__edit_file"]
+                            self.assertTrue(read.annotations.readOnlyHint)
+                            self.assertFalse(write.annotations.readOnlyHint)
+                            self.assertTrue(write.annotations.destructiveHint)
+                            self.assertIn("path", read.inputSchema["required"])
+                            self.assertNotIn("resolve_document", tools)
+                            result = await session.call_tool("filesystem__read_text_file", {"path": str(source)})
                             self.assertFalse(result.isError)
                             self.assertNotIn("Alice", str(result))
                             # HTTP result carries the filtered backend text inside the gateway's JSON envelope.
                             self.assertIn("[[PG:", str(result))
                             edited = await session.call_tool("filesystem__edit_file", {
-                                "document_id": ident, "expected_sha256": hashlib.sha256(b"Alice").hexdigest(),
+                                "path": str(source), "expected_sha256": hashlib.sha256(b"Alice").hexdigest(),
                                 "edits": [{"oldText": "Alice", "newText": "Changed"}]})
                             self.assertFalse(edited.isError)
-                            reread = await session.call_tool("filesystem__read_text_file", {"document_id": ident})
+                            reread = await session.call_tool("filesystem__read_text_file", {"path": str(source)})
                             self.assertFalse(reread.isError)
                             self.assertEqual(source.read_text(), "Changed")
-                            denied = await session.call_tool("filesystem__read_text_file", {"document_id": "doc_unknown"})
+                            denied = await session.call_tool("filesystem__read_text_file", {"path": str(sources / "missing.txt")})
                             self.assertTrue(denied.isError)
             self.assertEqual(proxy.sessions, {})
 
