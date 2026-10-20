@@ -165,12 +165,10 @@ class Document:
 
 class ProxyConfig:
     def __init__(self, raw: dict):
-        _object(raw, {"source_roots", "workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "mcp_servers", "documents", "auto_documents"},
+        _object(raw, {"workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars", "timeout_seconds", "backends", "mcp_servers"},
                 {"workspace", "language", "spacy_model", "entities", "score_threshold", "access_scope", "max_source_bytes", "max_output_chars"})
         if "backends" in raw and "mcp_servers" in raw:
             raise ValueError("Specify one MCP server map")
-        # Legacy source_roots/documents/auto_documents are accepted but no longer
-        # control access. The process filesystem and OS permissions define visibility.
         self.workspace = Path(raw["workspace"])
         if not self.workspace.is_absolute() or ".." in self.workspace.parts or self.workspace.is_symlink():
             raise ValueError("Invalid workspace")

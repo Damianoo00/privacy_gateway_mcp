@@ -42,18 +42,15 @@ class ProxyTests(unittest.TestCase):
         self.doc = self.source / "private.txt"
         self.doc.write_text("Alice", encoding="utf-8")
         self.config = {
-            "source_roots": [str(self.source)], "workspace": str(self.workspace),
+            "workspace": str(self.workspace),
             "language": "en", "spacy_model": "en_core_web_lg", "entities": ["PERSON"],
             "score_threshold": 0.35, "access_scope": "scope", "max_source_bytes": 100000,
             "max_output_chars": 100000, "backends": {"filesystem": {
                 "command": str(Path(sys.executable).resolve()), "args": [], "tools": ["read_text_file", "edit_file"]}},
-            "documents": [{"id": "doc_first_12345678", "path": str(self.doc), "backend": "filesystem"}],
         }
         self.proxy = PrivacyProxy(ProxyConfig(self.config), bytes(range(32)), Detector())
 
     def test_unregistered_paths_anywhere_are_masked(self):
-        self.config.pop("documents")
-        self.config.pop("source_roots")
         config = ProxyConfig(self.config)
         proxy = PrivacyProxy(config, bytes(range(32)), Detector())
         proxy.sessions["filesystem"] = Session(lambda name, args: reply(Path(args["path"]).read_text()))
@@ -63,6 +60,12 @@ class ProxyTests(unittest.TestCase):
             self.assertNotIn("Alice", json.dumps(result))
             self.assertIn("[[PG:PERSON:", json.dumps(result))
         self.assertFalse(hasattr(config, "documents"))
+
+    def test_obsolete_document_registration_settings_are_rejected(self):
+        for field, value in (("documents", []), ("auto_documents", True),
+                             ("source_roots", [str(self.source)])):
+            with self.subTest(field=field), self.assertRaises(GatewayError):
+                ProxyConfig({**self.config, field: value})
 
     def test_unsafe_paths_denied(self):
         outside = self.source.parent / "outside.txt"
@@ -111,7 +114,6 @@ class ProxyTests(unittest.TestCase):
         token = self.proxy.vault.issue(self.proxy.config.document(str(self.doc), "filesystem").ident, "PERSON", "Alice")
         second = self.source / "another.txt"
         second.write_text("Bob")
-        self.config["documents"].append({"id": "doc_second_12345678", "path": str(second), "backend": "filesystem"})
         proxy = PrivacyProxy(ProxyConfig(self.config), bytes(range(32)), Detector())
         async def flow():
             for bad in (token, "[[PG:PERSON:" + "0" * 32 + "]]"):

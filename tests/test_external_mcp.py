@@ -27,16 +27,15 @@ class ExternalConfigTests(unittest.TestCase):
         self.document = source / "private.txt"
         self.document.write_text("Alice")
         self.raw = {
-            "source_roots": [str(source)], "workspace": str(base / "workspace"),
+            "workspace": str(base / "workspace"),
             "language": "en", "spacy_model": "en_core_web_lg", "entities": ["PERSON"],
             "score_threshold": .35, "access_scope": "scope", "max_source_bytes": 100000,
             "max_output_chars": 100000,
             "mcp_servers": {"my_files": {"profile": "filesystem", "enabled_tools": ["read_text_file"],
                                          "url": "http://127.0.0.1:8101/mcp", "workspace_path": "/remote/shared"}},
-            "documents": [{"id": "doc_first_12345678", "path": str(self.document), "backend": "my_files"}],
         }
 
-    def test_arbitrary_id_routes_through_profile_and_rewrites_path(self):
+    def test_server_alias_routes_through_profile_and_rewrites_path(self):
         proxy = PrivacyProxy(ProxyConfig(self.raw), bytes(range(32)), Detector())
         seen = []
 
@@ -63,7 +62,6 @@ class ExternalConfigTests(unittest.TestCase):
 
     def test_empty_config_and_validation(self):
         self.raw["mcp_servers"] = {}
-        self.raw["documents"] = []
         proxy = PrivacyProxy(ProxyConfig(self.raw), bytes(range(32)), Detector())
         self.assertEqual(proxy.public_tools(), [])
         self.raw["mcp_servers"] = {"alias": {"profile": "unknown", "enabled_tools": ["read_text_file"], "url": "http://localhost/mcp"}}
@@ -80,7 +78,6 @@ class ExternalConfigTests(unittest.TestCase):
     def test_toml_loading_and_transport_exclusion(self):
         path = Path(self.tmp.name) / "config.toml"
         path.write_text("""
-source_roots = ["%s"]
 workspace = "%s"
 language = "en"
 spacy_model = "en_core_web_lg"
@@ -90,7 +87,7 @@ access_scope = "scope"
 max_source_bytes = 100000
 max_output_chars = 100000
 [mcp_servers]
-""" % (self.document.parent, Path(self.tmp.name) / "workspace"))
+""" % (Path(self.tmp.name) / "workspace"))
         self.assertEqual(ProxyConfig.load(str(path)).backends, {})
         self.raw["mcp_servers"]["my_files"]["command"] = sys.executable
         with self.assertRaises(ValueError):

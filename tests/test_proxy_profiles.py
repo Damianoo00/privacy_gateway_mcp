@@ -34,20 +34,15 @@ class ProfileTests(unittest.TestCase):
             "excel": ["excel_describe_sheets", "excel_read_sheet", "excel_write_to_sheet"],
             "pptx": ["pptx_get_info", "pptx_read_slide", "pptx_edit_text"],
         }
-        docs = []
         for backend, suffix in (("docx", ".docx"), ("excel", ".xlsx"), ("pptx", ".pptx")):
             path = sources / (backend + suffix)
             path.write_text("Alice", encoding="utf-8")
             self.paths[backend] = path
-            doc = {"id": "doc_contract_" + backend, "path": str(path), "backend": backend}
-            if backend == "excel":
-                doc["sheets"] = {"sheet1": "People"}
-            docs.append(doc)
         raw = {
-            "source_roots": [str(sources)], "workspace": str(base / "private"),
+            "workspace": str(base / "private"),
             "language": "en", "spacy_model": "en_core_web_lg", "entities": ["PERSON"],
             "score_threshold": .35, "access_scope": "project", "max_source_bytes": 10485760,
-            "max_output_chars": 100000, "documents": docs,
+            "max_output_chars": 100000,
             "backends": {name: {"command": str(Path(sys.executable).resolve()), "args": [], "tools": tools}
                          for name, tools in profiles.items()},
         }

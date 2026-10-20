@@ -68,16 +68,14 @@ class HTTPTests(unittest.TestCase):
             sources.mkdir()
             source = sources / "note.txt"
             source.write_text("Alice", encoding="utf-8")
-            ident = "doc_http_12345678"
             config = ProxyConfig({
-                "source_roots": [str(sources)], "workspace": str(root / "workspace"),
+                "workspace": str(root / "workspace"),
                 "language": "en", "spacy_model": "en_core_web_lg", "entities": ["PERSON"],
                 "score_threshold": 0.35, "access_scope": "test", "max_source_bytes": 10000,
                 "max_output_chars": 10000,
                 "backends": {"filesystem": {"command": str(Path(sys.executable).absolute()),
                     "args": [str(Path(__file__).with_name("fixture_mcp_server.py").resolve())],
                     "tools": ["read_text_file", "edit_file"]}},
-                "documents": [{"id": ident, "path": str(source), "backend": "filesystem"}],
             })
             proxy = PrivacyProxy(config, bytes(range(32)), Detector())
             async with proxy_backends(proxy):
